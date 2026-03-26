@@ -82,6 +82,16 @@ class AivpnCrypto(private val serverStaticPub: ByteArray) {
     }
 
     /**
+     * Build a post-handshake keepalive control packet.
+     */
+    fun buildKeepalivePacket(): ByteArray {
+        val innerHeader = buildInnerHeader(0x02, sendSeq++) // 0x02 = Control
+        val controlPayload = byteArrayOf(0x03) // Keepalive subtype
+        val innerPayload = innerHeader + controlPayload
+        return buildPacket(innerPayload, null)
+    }
+
+    /**
      * Process ServerHello — complete the PFS ratchet.
      * Returns true if the ratchet succeeded.
      */

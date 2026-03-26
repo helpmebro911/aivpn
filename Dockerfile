@@ -52,7 +52,7 @@ EXPOSE 443/udp
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD pgrep -x aivpn-server || exit 1
+    CMD test "$(basename "$(readlink /proc/1/exe 2>/dev/null)")" = "aivpn-server" || exit 1
 
 # Run as root (required for TUN device and NAT)
 ENTRYPOINT ["/usr/local/bin/aivpn-server"]

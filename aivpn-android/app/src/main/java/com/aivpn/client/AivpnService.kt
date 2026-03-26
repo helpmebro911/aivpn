@@ -11,6 +11,7 @@ import kotlinx.coroutines.*
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.net.SocketTimeoutException
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -141,10 +142,14 @@ class AivpnService : VpnService() {
                 val udpToTun = launch {
                     serverToTun(socket, tunOut, crypto)
                 }
+                val keepaliveLoop = launch {
+                    keepaliveToServer(socket, crypto)
+                }
 
                 // Wait until either direction fails or is cancelled
                 tunToUdp.join()
                 udpToTun.join()
+                keepaliveLoop.join()
 
             } catch (e: CancellationException) {
                 // Normal shutdown
@@ -204,6 +209,26 @@ class AivpnService : VpnService() {
                     totalDownloadBytes += decrypted.size
                     trafficCallback?.invoke(totalUploadBytes, totalDownloadBytes)
                 }
+            } catch (e: Exception) {
+                if (isActive) throw e
+            }
+        }
+    }
+
+    /**
+     * Keep the UDP mapping and server session alive while the tunnel is idle.
+     */
+    private suspend fun keepaliveToServer(
+        socket: DatagramSocket,
+        crypto: AivpnCrypto
+    ) = withContext(Dispatchers.IO) {
+        while (isActive) {
+            try {
+                delay(15_000)
+                val keepalive = crypto.buildKeepalivePacket()
+                socket.send(DatagramPacket(keepalive, keepalive.size))
+            } catch (e: SocketTimeoutException) {
+                if (isActive) throw e
             } catch (e: Exception) {
                 if (isActive) throw e
             }
