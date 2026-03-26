@@ -13,12 +13,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY aivpn-common aivpn-common/
 COPY aivpn-server aivpn-server/
 COPY aivpn-client aivpn-client/
 
-# Build in release mode
+# Build in release mode (Cargo.lock is auto-generated if missing)
 RUN cargo build --release --bin aivpn-server
 
 # Stage 2: Runtime
