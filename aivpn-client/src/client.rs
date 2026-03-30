@@ -14,6 +14,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{info, debug, error, warn};
+use bytes::Bytes;
 
 use aivpn_common::crypto::{
     self, SessionKeys, KeyPair, TAG_SIZE, NONCE_SIZE, X25519_PUBLIC_KEY_SIZE,
@@ -67,6 +68,9 @@ pub struct AivpnClient {
     // Traffic counters
     bytes_sent: Arc<std::sync::atomic::AtomicU64>,
     bytes_received: Arc<std::sync::atomic::AtomicU64>,
+    // Pre-allocated buffers for zero-copy I/O (OPTIMIZATION)
+    send_buf: Vec<u8>,
+    recv_buf: Vec<u8>,
 }
 
 impl AivpnClient {
@@ -91,6 +95,9 @@ impl AivpnClient {
             recv_counter: 0,
             bytes_sent: bytes_sent.clone(),
             bytes_received: bytes_received.clone(),
+            // Pre-allocate buffers to MAX_PACKET_SIZE to avoid reallocations
+            send_buf: Vec::with_capacity(MAX_PACKET_SIZE),
+            recv_buf: Vec::with_capacity(MAX_PACKET_SIZE),
         })
     }
     
@@ -167,9 +174,9 @@ impl AivpnClient {
         info!("Starting client main loop");
         info!("Routing traffic through AIVPN tunnel...");
 
-        // Create channels for TUN <-> UDP forwarding
-        let (tun_to_udp_tx, mut tun_to_udp_rx) = mpsc::channel::<Vec<u8>>(100);
-        let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Vec<u8>>(100);
+        // Create channels for TUN <-> UDP forwarding (using Bytes for zero-copy)
+        let (tun_to_udp_tx, mut tun_to_udp_rx) = mpsc::channel::<Bytes>(100);
+        let (udp_to_tun_tx, mut udp_to_tun_rx) = mpsc::channel::<Bytes>(100);
 
         // Take the TUN reader for the spawned task (no Mutex needed)
         let mut tun_reader = self.tunnel.take_reader()
@@ -191,15 +198,15 @@ impl AivpnClient {
                             #[cfg(target_os = "macos")]
                             let payload = if n > 4 && buf[0] == 0 && buf[1] == 0 {
                                 // Strip 4-byte PI header
-                                &buf[4..n]
+                                Bytes::copy_from_slice(&buf[4..n])
                             } else {
-                                &buf[..n]
+                                Bytes::copy_from_slice(&buf[..n])
                             };
 
                             #[cfg(not(target_os = "macos"))]
-                            let payload = &buf[..n];
+                            let payload = Bytes::copy_from_slice(&buf[..n]);
 
-                            let _ = tun_to_udp_tx_clone.send(payload.to_vec()).await;
+                            let _ = tun_to_udp_tx_clone.send(payload).await;
                         }
                     }
                     Err(e) => {
@@ -227,7 +234,7 @@ impl AivpnClient {
                     Ok(n) => {
                         consecutive_errors = 0;
                         if n > 0 {
-                            let _ = udp_to_tun_tx_clone.send(buf[..n].to_vec()).await;
+                            let _ = udp_to_tun_tx_clone.send(Bytes::copy_from_slice(&buf[..n])).await;
                         }
                     }
                     Err(e) => {

@@ -487,12 +487,12 @@ impl Tunnel {
         }
         info!("Full tunnel routes removed");
     }
-    
+
     /// Disable full-tunnel mode on Windows
     #[cfg(target_os = "windows")]
     fn disable_full_tunnel(&mut self) {
         use std::process::Command;
-        
+
         for net in [("0.0.0.0", "128.0.0.0"), ("128.0.0.0", "128.0.0.0")] {
             let _ = Command::new("route").args(["delete", net.0, "mask", net.1]).status();
         }
@@ -500,6 +500,29 @@ impl Tunnel {
             let _ = Command::new("route").args(["delete", server_ip]).status();
         }
         info!("Full tunnel routes removed");
+    }
+
+    /// Restore IPv6 on macOS when disconnecting
+    #[cfg(target_os = "macos")]
+    fn restore_ipv6(&self) {
+        use std::process::Command;
+        
+        info!("Restoring IPv6...");
+        // Remove blackhole route
+        let _ = Command::new("/sbin/route").args(["-n", "delete", "-inet6", "-net", "::/0", "-blackhole"]).status();
+        // Restore default IPv6 route (will be re-added by system when needed)
+        let _ = Command::new("/sbin/route").args(["-n", "add", "-inet6", "default", "-interface", "en0"]).status();
+        info!("IPv6 restored");
+    }
+
+    /// Restore IPv6 on Linux
+    #[cfg(target_os = "linux")]
+    fn restore_ipv6(&self) {
+        use std::process::Command;
+        
+        info!("Restoring IPv6...");
+        let _ = Command::new("ip").args(["-6", "route", "add", "default", "dev", "eth0"]).status();
+        info!("IPv6 restored");
     }
     
     /// Take the TUN reader (moves ownership to caller, e.g. spawned task)
@@ -538,6 +561,11 @@ impl Drop for Tunnel {
         if self.config.full_tunnel && self.saved_default_gw.is_some() {
             self.disable_full_tunnel();
         }
+        
+        // Restore IPv6 on macOS
+        #[cfg(target_os = "macos")]
+        self.restore_ipv6();
+        
         if self.writer.is_some() || self.reader.is_some() {
             info!("Closing TUN device: {}", self.config.tun_name);
         }

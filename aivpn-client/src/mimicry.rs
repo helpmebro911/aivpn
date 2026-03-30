@@ -153,20 +153,21 @@ impl MimicryEngine {
     ) -> Result<Vec<u8>> {
         // Build MDH first (needed for overhead calculation)
         let mdh = self.build_mdh(eph_pub);
-        
+
         // Determine padding: total = TAG + MDH + encrypt(2 + plaintext + padding)
         // encrypt adds POLY1305_TAG_SIZE bytes
         let target_size = self.sample_packet_size();
         let base_overhead = TAG_SIZE + mdh.len() + 2 + plaintext.len() + POLY1305_TAG_SIZE;
         let pad_len = self.calc_padding(base_overhead, target_size);
-        
+
         // Build padded plaintext: pad_len(u16) || plaintext || random_padding
         let mut padded = Vec::with_capacity(2 + plaintext.len() + pad_len as usize);
         padded.extend_from_slice(&pad_len.to_le_bytes());
         padded.extend_from_slice(plaintext);
-        for _ in 0..pad_len {
-            padded.push(self.rng.gen());
-        }
+        
+        // OPTIMIZATION: Use batch random generation instead of per-byte
+        padded.resize(2 + plaintext.len() + pad_len as usize, 0);
+        self.rng.fill_bytes(&mut padded[2 + plaintext.len()..]);
         
         // Encrypt padded payload
         let nonce = self.generate_nonce(*counter);

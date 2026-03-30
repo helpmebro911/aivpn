@@ -101,6 +101,37 @@ func killExistingClient() {
     }
 
     try? FileManager.default.removeItem(atPath: PID_PATH)
+    
+    // Restore IPv6 after stopping client
+    restoreIPv6()
+}
+
+/// Restore IPv6 routing after VPN disconnect
+func restoreIPv6() {
+    log("Restoring IPv6 routing...")
+    
+    // Remove blackhole route if it exists
+    let _ = runCommand("/sbin/route", args: ["-n", "delete", "-inet6", "-net", "::/0", "-blackhole"])
+    
+    // Restore default IPv6 route via en0
+    let _ = runCommand("/sbin/route", args: ["-n", "add", "-inet6", "default", "-interface", "en0"])
+    
+    log("IPv6 routing restored")
+}
+
+/// Run a command and return success
+func runCommand(_ path: String, args: [String]) -> Bool {
+    let task = Process()
+    task.launchPath = path
+    task.arguments = args
+    do {
+        try task.run()
+        task.waitUntilExit()
+        return task.terminationStatus == 0
+    } catch {
+        log("Command failed: \(path) \(args.joined(separator: " ")) - \(error)")
+        return false
+    }
 }
 
 /// Start aivpn-client with the given configuration using posix_spawn
