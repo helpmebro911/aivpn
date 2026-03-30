@@ -66,11 +66,13 @@ class VPNManager: ObservableObject {
 #!/bin/bash
 # Kill old instance
 if [ -f /tmp/aivpn_client.pid ]; then
-    kill $(cat /tmp/aivpn_client.pid) 2>/dev/null
+    kill $(cat /tmp/aivpn_client.pid) 2>/dev/null || true
     rm -f /tmp/aivpn_client.pid
 fi
-# Start aivpn-client in background
-nohup "\(finalBinary)" -k "\(normalizedKey)" \(tunnelArg) > /tmp/aivpn_client.log 2>&1 &
+# Clear old log
+> /tmp/aivpn_client.log
+# Start aivpn-client in background using setsid to properly detach
+setsid "\(finalBinary)" -k "\(normalizedKey)" \(tunnelArg) > /tmp/aivpn_client.log 2>&1 &
 echo $! > /tmp/aivpn_client.pid
 exit 0
 """
