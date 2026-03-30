@@ -135,15 +135,24 @@ impl Tunnel {
         
         if !status.success() {
             error!("ifconfig failed with status: {}", status);
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("ifconfig failed: {}", status),
+            )));
         } else {
             info!("Configured {} with {} -> {} (netmask 255.255.255.0)", tun_name, tun_addr, peer_addr);
         }
         
         // Delete any stale routes to prevent conflicts
+        info!("Cleaning up stale routes...");
         let _ = Command::new("route").args(["-n", "delete", "-host", peer_addr]).status();
-        let _ = Command::new("route").args(["-n", "delete", "-net", "10.0.0.0/24"]).status();
+        let _ = Command::new("route").args(["-n", "delete", "-net", "10.0.0.0", "-netmask", "255.255.255.0"]).status();
         
-        // Add host route for the peer (10.0.0.1)
+        // Small delay to ensure routes are cleaned up
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        
+        // Add host route for the peer (10.0.0.1) - REQUIRED for point-to-point
+        info!("Adding host route for peer {} via {}", peer_addr, tun_name);
         let status = Command::new("route")
             .args(["-n", "add", "-host", peer_addr, "-interface", tun_name])
             .status()
@@ -151,22 +160,45 @@ impl Tunnel {
                 format!("Failed to add host route: {}", e))))?;
         
         if !status.success() {
-            error!("route add -host {} failed: {}", peer_addr, status);
+            error!("route add -host {} failed with status: {}", peer_addr, status);
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to add host route: {}", status),
+            )));
         } else {
-            info!("Added host route {} via {}", peer_addr, tun_name);
+            info!("✓ Added host route {} via {}", peer_addr, tun_name);
         }
         
         // Add subnet route for 10.0.0.0/24
+        info!("Adding subnet route 10.0.0.0/24 via {}", tun_name);
         let status = Command::new("route")
-            .args(["-n", "add", "-net", "10.0.0.0/24", "-interface", tun_name])
+            .args(["-n", "add", "-net", "10.0.0.0", "-netmask", "255.255.255.0", "-interface", tun_name])
             .status()
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, 
-                format!("Failed to add route: {}", e))))?;
+                format!("Failed to add subnet route: {}", e))))?;
         
         if !status.success() {
-            debug!("route add -net 10.0.0.0/24 failed (may already exist): {}", status);
+            error!("route add -net 10.0.0.0/24 failed with status: {}", status);
+            // Don't fail completely - host route is more important
+            debug!("Subnet route may already exist or not be needed");
         } else {
-            info!("Added route 10.0.0.0/24 via {}", tun_name);
+            info!("✓ Added subnet route 10.0.0.0/24 via {}", tun_name);
+        }
+        
+        // Verify routes
+        info!("Verifying routes...");
+        let output = Command::new("netstat")
+            .args(["-rn", "-f", "inet"])
+            .output()
+            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, 
+                format!("Failed to run netstat: {}", e))))?;
+        
+        let routes = String::from_utf8_lossy(&output.stdout);
+        if routes.contains("10.0.0") {
+            info!("Routes verified:");
+            for line in routes.lines().filter(|l| l.contains("10.0.0")) {
+                debug!("  {}", line.trim());
+            }
         }
         
         Ok(())
