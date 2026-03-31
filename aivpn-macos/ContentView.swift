@@ -7,7 +7,7 @@ struct ContentView: View {
     @State private var connectionKey: String = ""
     @State private var keyName: String = ""
     @State private var showKeyInput: Bool = false
-    @State private var fullTunnel: Bool = false
+    @AppStorage("fullTunnel") private var fullTunnel: Bool = false
     @State private var editingKeyId: String?
     @State private var editingKeyName: String = ""
     @State private var showDeleteConfirm = false
@@ -151,6 +151,7 @@ struct ContentView: View {
                                     onEdit: {
                                         editingKeyId = key.id
                                         editingKeyName = key.name
+                                        keyName = key.name  // Заполнить поле имени текущим именем
                                         connectionKey = key.keyValue  // Показать текущий ключ
                                         withAnimation {
                                             showKeyInput = true
