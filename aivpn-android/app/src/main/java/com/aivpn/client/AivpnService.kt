@@ -178,12 +178,20 @@ class AivpnService : VpnService() {
 
         // Build TUN (must stay in Kotlin — Android API).
         // setBlocking(false): Rust uses epoll/AsyncFd on the raw fd.
+        //
+        // IPv6 strategy: we do NOT support IPv6 forwarding, but we MUST route ::/0 into the
+        // TUN to prevent IPv6 leaks (traffic bypassing the VPN on the real interface).
+        // A dummy ULA address is required so Android accepts the ::/0 route.
+        // Rust drops all non-IPv4 packets it reads from TUN, so they go nowhere safely.
         val pfd = Builder()
             .setSession("AIVPN")
             .addAddress(tunAddress4, 24)
-            .addRoute("0.0.0.0", 0)
+            .addRoute("0.0.0.0", 0)          // IPv4: route all through VPN
+            .addAddress("fd00::2", 128)       // dummy ULA — required to bind ::/0 route
+            .addRoute("::", 0)               // IPv6: route all through VPN (dropped in Rust)
             .addDnsServer("8.8.8.8")
             .addDnsServer("1.1.1.1")
+            .addDnsServer("2001:4860:4860::8888") // Google DNS over IPv4 (reachable via v4)
             .setMtu(TUN_MTU)
             .setBlocking(false)
             .establish() ?: throw Exception("Failed to establish VPN interface")

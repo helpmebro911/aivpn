@@ -134,6 +134,10 @@ pub async fn run_tunnel_android(
             r = tun_async_read(&tun, &mut tun_buf) => {
                 let n = r?;
                 if n == 0 { continue; }
+                // Drop non-IPv4 packets (IPv6 version nibble = 6, first byte 0x60-0x6F).
+                // Android routes ::/0 into TUN to prevent IPv6 leaks; we must discard
+                // those packets here because the server only speaks IPv4.
+                if tun_buf[0] >> 4 != 4 { continue; }
                 let inner = build_inner(INNER_TYPE_DATA, send_seq, &tun_buf[..n]);
                 send_seq = send_seq.wrapping_add(1);
                 let pkt = build_packet(&keys, &mut send_counter, &inner, None)?;
