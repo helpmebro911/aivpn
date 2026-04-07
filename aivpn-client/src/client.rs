@@ -8,6 +8,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -55,6 +56,12 @@ pub enum ClientState {
     Disconnected,
 }
 
+struct UploadCryptoState {
+    keys: SessionKeys,
+    counter: u64,
+    seq: u16,
+}
+
 /// AIVPN Client instance
 pub struct AivpnClient {
     config: ClientConfig,
@@ -63,6 +70,7 @@ pub struct AivpnClient {
     udp_socket: Option<Arc<UdpSocket>>,
     mimicry_engine: Option<MimicryEngine>,
     session_keys: Option<SessionKeys>,
+    upload_state: Option<Arc<Mutex<UploadCryptoState>>>,
     transition_recv_keys: Option<SessionKeys>,
     keypair: KeyPair,
     counter: u64,
@@ -93,6 +101,7 @@ impl AivpnClient {
             udp_socket: None,
             mimicry_engine: None,
             session_keys: None,
+            upload_state: None,
             transition_recv_keys: None,
             keypair,
             counter: 0,
@@ -187,6 +196,7 @@ impl AivpnClient {
         
         // Zeroize keys
         self.session_keys = None;
+        self.upload_state = None;
         self.transition_recv_keys = None;
     }
     
@@ -308,7 +318,12 @@ impl AivpnClient {
         let upload_seq = self.send_seq as u16;
         let upload_counter = self.counter;
         let upload_bytes_sent = self.bytes_sent.clone();
-        let upload_bytes_sent = self.bytes_sent.clone();
+        let upload_state = Arc::new(Mutex::new(UploadCryptoState {
+            keys: upload_keys,
+            counter: upload_counter,
+            seq: upload_seq,
+        }));
+        self.upload_state = Some(upload_state.clone());
 
         // Store mdh_len for the receive path (before moving engine into the task).
         let mdh_len = upload_engine.mask().header_template.len();
@@ -317,9 +332,7 @@ impl AivpnClient {
             tun_to_udp_rx,
             upload_udp,
             upload_engine,
-            upload_keys,
-            upload_counter,
-            upload_seq,
+            upload_state,
             upload_bytes_sent,
         ));
 
@@ -385,34 +398,34 @@ impl AivpnClient {
         mut rx: mpsc::Receiver<Vec<u8>>,
         udp: Arc<UdpSocket>,
         engine: MimicryEngine,
-        keys: SessionKeys,
-        counter: u64,
-        seq: u16,
+        upload_state: Arc<Mutex<UploadCryptoState>>,
         bytes_sent: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<()> {
         /// Wraps MimicryEngine to implement the shared PacketEncryptor trait.
         struct MimicryEncryptor {
             engine: MimicryEngine,
-            keys: SessionKeys,
-            counter: u64,
-            seq: u16,
+            upload_state: Arc<Mutex<UploadCryptoState>>,
             bytes_sent: Arc<std::sync::atomic::AtomicU64>,
         }
 
         impl PacketEncryptor for MimicryEncryptor {
             fn encrypt_data(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
-                let inner = build_inner_packet(InnerType::Data, self.seq, payload);
-                self.seq = self.seq.wrapping_add(1);
-                let pkt = self.engine.build_packet(&inner, &self.keys, &mut self.counter, None)?;
+                let mut state = self.upload_state.lock().expect("upload state poisoned");
+                let inner = build_inner_packet(InnerType::Data, state.seq, payload);
+                state.seq = state.seq.wrapping_add(1);
+                let keys = state.keys.clone();
+                let pkt = self.engine.build_packet(&inner, &keys, &mut state.counter, None)?;
                 self.engine.update_fsm();
                 Ok(pkt)
             }
 
             fn encrypt_keepalive(&mut self) -> Result<Vec<u8>> {
+                let mut state = self.upload_state.lock().expect("upload state poisoned");
                 let keepalive = ControlPayload::Keepalive.encode()?;
-                let inner = build_inner_packet(InnerType::Control, self.seq, &keepalive);
-                self.seq = self.seq.wrapping_add(1);
-                self.engine.build_packet(&inner, &self.keys, &mut self.counter, None)
+                let inner = build_inner_packet(InnerType::Control, state.seq, &keepalive);
+                state.seq = state.seq.wrapping_add(1);
+                let keys = state.keys.clone();
+                self.engine.build_packet(&inner, &keys, &mut state.counter, None)
             }
 
             fn on_data_sent(&mut self, payload_len: usize) {
@@ -420,7 +433,7 @@ impl AivpnClient {
             }
         }
 
-        let mut enc = MimicryEncryptor { engine, keys, counter, seq, bytes_sent };
+        let mut enc = MimicryEncryptor { engine, upload_state, bytes_sent };
         let config = UploadConfig {
             keepalive_interval: Duration::from_secs(15),
             ..Default::default()
@@ -527,6 +540,12 @@ impl AivpnClient {
                 self.session_keys = Some(ratcheted);
                 self.counter = 0;
                 self.recv_window.reset();
+                if let Some(upload_state) = &self.upload_state {
+                    let mut state = upload_state.lock().expect("upload state poisoned");
+                    state.keys = self.session_keys.clone().expect("session keys set");
+                    state.counter = 0;
+                    info!("Outbound ratchet activated — upload switched to new keys");
+                }
                 info!("PFS ratchet complete — forward secrecy established");
             }
             ControlPayload::Keepalive => {
