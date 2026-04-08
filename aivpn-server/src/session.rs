@@ -119,6 +119,24 @@ impl u256 {
             self.hi |= 1u128 << (bit - 128);
         }
     }
+
+    pub fn shift_left(&mut self, shift: usize) {
+        if shift == 0 {
+            return;
+        }
+        if shift >= 256 {
+            self.clear();
+            return;
+        }
+        if shift >= 128 {
+            self.hi = self.lo << (shift - 128);
+            self.lo = 0;
+            return;
+        }
+
+        self.hi = (self.hi << shift) | (self.lo >> (128 - shift));
+        self.lo <<= shift;
+    }
     
     pub fn get_bit(&self, bit: usize) -> bool {
         if bit < 128 {
@@ -188,15 +206,17 @@ impl Session {
             crypto::current_timestamp_ms(),
             DEFAULT_WINDOW_MS,
         );
-        
-        // Pre-compute tags for next TAG_WINDOW_SIZE packets.
-        // Include adjacent time windows (tw-1, tw, tw+1) for clock skew
-        // tolerance between client and server.
+
+        // Pre-compute tags for a bidirectional window around the highest
+        // validated counter so minor UDP reordering does not fall out of the
+        // fast path lookup map.
         self.expected_tags.clear();
         self.tag_window_base = self.counter;
-        for i in 0..TAG_WINDOW_SIZE {
-            let counter_val = self.counter + i as u64;
-            // Current window tag goes into expected_tags (used for counter lookup)
+        let window_back = TAG_WINDOW_SIZE as u64 - 1;
+        let window_start = self.counter.saturating_sub(window_back);
+        let window_end = self.counter.saturating_add(TAG_WINDOW_SIZE as u64 - 1);
+
+        for counter_val in window_start..=window_end {
             let tag = crypto::generate_resonance_tag(
                 &self.keys.tag_secret,
                 counter_val,
@@ -211,12 +231,23 @@ impl Session {
     /// Checks the current time window first, then adjacent windows (±1)
     /// for clock skew tolerance.
     pub fn validate_tag(&self, tag: &[u8; TAG_SIZE]) -> Option<(u64, bool)> {
+        let is_replay = |counter_val: u64| {
+            if counter_val > self.counter {
+                return false;
+            }
+
+            let bit_index = (self.counter - counter_val) as usize;
+            bit_index < TAG_WINDOW_SIZE && self.received_bitmap.get_bit(bit_index)
+        };
+
+        let history_window = TAG_WINDOW_SIZE as u64 - 1;
+        let window_start = self.counter.saturating_sub(history_window);
+        let window_end = self.counter.saturating_add(TAG_WINDOW_SIZE as u64 - 1);
+
         // Check initial keys — current time window (pre-computed)
         for (counter, expected) in &self.expected_tags {
             if bool::from(expected.ct_eq(tag)) {
-                // Check anti-replay
-                let bit_index = counter - self.counter;
-                if bit_index < 256 && self.received_bitmap.get_bit(bit_index as usize) {
+                if is_replay(*counter) {
                     return None; // Already received
                 }
                 return Some((*counter, false));
@@ -228,16 +259,14 @@ impl Session {
             DEFAULT_WINDOW_MS,
         );
         for tw_offset in [current_tw.wrapping_sub(1), current_tw.wrapping_add(1)] {
-            for i in 0..TAG_WINDOW_SIZE {
-                let counter_val = self.counter + i as u64;
+            for counter_val in window_start..=window_end {
                 let expected = crypto::generate_resonance_tag(
                     &self.keys.tag_secret,
                     counter_val,
                     tw_offset,
                 );
                 if bool::from(expected.ct_eq(tag)) {
-                    let bit_index = i;
-                    if bit_index < 256 && self.received_bitmap.get_bit(bit_index) {
+                    if is_replay(counter_val) {
                         return None;
                     }
                     return Some((counter_val, false));
@@ -272,9 +301,17 @@ impl Session {
     
     /// Mark tag as received
     pub fn mark_tag_received(&mut self, counter: u64) {
-        let bit_index = counter - self.counter;
+        if counter > self.counter {
+            let shift = (counter - self.counter) as usize;
+            self.received_bitmap.shift_left(shift);
+            self.counter = counter;
+            self.received_bitmap.set_bit(0);
+            return;
+        }
+
+        let bit_index = (self.counter - counter) as usize;
         if bit_index < 256 {
-            self.received_bitmap.set_bit(bit_index as usize);
+            self.received_bitmap.set_bit(bit_index);
         }
     }
     
@@ -551,6 +588,23 @@ impl SessionManager {
                 }
             }
         }
+    }
+
+    /// Return true when the same public IP already has a fresh ratcheted session
+    /// on a different socket endpoint. This helps ignore stale duplicate-port
+    /// probes instead of spawning a new handshake loop.
+    pub fn has_recent_ratcheted_session_on_other_endpoint(
+        &self,
+        client_addr: &SocketAddr,
+        max_age: Duration,
+    ) -> bool {
+        self.sessions.iter().any(|entry| {
+            let sess = entry.value().lock();
+            sess.client_addr.ip() == client_addr.ip()
+                && sess.client_addr != *client_addr
+                && sess.is_ratcheted
+                && sess.last_seen.elapsed() <= max_age
+        })
     }
     
     /// Get session by tag (O(1) lookup)

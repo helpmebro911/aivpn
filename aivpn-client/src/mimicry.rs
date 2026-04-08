@@ -12,6 +12,11 @@ use aivpn_common::protocol::{AivpnPacket, InnerType, InnerHeader, ControlPayload
 use aivpn_common::mask::{MaskProfile, PaddingStrategy, SpoofProtocol};
 use aivpn_common::error::{Error, Result};
 
+// Real WAN uplinks are more sensitive to near-MTU UDP datagrams than local Docker paths.
+// After stabilizing the counter/tag path, use a less conservative budget to recover throughput
+// without going all the way back to 1500-byte outer datagrams.
+const SAFE_OUTER_PACKET_BUDGET: usize = 1380;
+
 /// Mimicry Engine state
 pub struct MimicryState {
     pub current_state: u16,
@@ -160,7 +165,8 @@ impl MimicryEngine {
         let target_size = self.sample_packet_size();
         let base_overhead = TAG_SIZE + mdh.len() + 2 + plaintext.len() + POLY1305_TAG_SIZE;
         let requested_pad_len = self.calc_padding(base_overhead, target_size);
-        let max_pad_len = MAX_PACKET_SIZE.saturating_sub(base_overhead) as u16;
+        let packet_budget = SAFE_OUTER_PACKET_BUDGET.min(MAX_PACKET_SIZE);
+        let max_pad_len = packet_budget.saturating_sub(base_overhead) as u16;
         let pad_len = requested_pad_len.min(max_pad_len);
 
         // Build padded plaintext: pad_len(u16) || plaintext || random_padding
@@ -173,7 +179,8 @@ impl MimicryEngine {
         self.rng.fill_bytes(&mut padded[2 + plaintext.len()..]);
         
         // Encrypt padded payload
-        let nonce = self.generate_nonce(*counter);
+        let packet_counter = *counter;
+        let nonce = self.generate_nonce(packet_counter);
         let ciphertext = encrypt_payload(&keys.session_key, &nonce, &padded)?;
         
         // Generate resonance tag
@@ -181,7 +188,7 @@ impl MimicryEngine {
             crypto::current_timestamp_ms(),
             aivpn_common::crypto::DEFAULT_WINDOW_MS,
         );
-        let tag = crypto::generate_resonance_tag(&keys.tag_secret, *counter, time_window);
+        let tag = crypto::generate_resonance_tag(&keys.tag_secret, packet_counter, time_window);
         *counter += 1;
         
         // Assemble packet: TAG | MDH | ciphertext (no cleartext pad_len or padding)
@@ -189,7 +196,7 @@ impl MimicryEngine {
         packet.extend_from_slice(&tag);
         packet.extend_from_slice(&mdh);
         packet.extend_from_slice(&ciphertext);
-        
+
         Ok(packet)
     }
     

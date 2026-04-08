@@ -9,7 +9,6 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time;
-
 use crate::client_wire::{build_inner_packet, build_zero_mdh_packet};
 use crate::crypto::SessionKeys;
 use crate::error::{Error, Result};
@@ -124,6 +123,7 @@ pub async fn run_upload_loop(
     config: &UploadConfig,
 ) -> Result<()> {
     let mut ka_interval = time::interval(config.keepalive_interval);
+    let mut data_packet_count: u64 = 0;
     ka_interval.tick().await; // skip the immediate first tick
 
     loop {
@@ -139,6 +139,7 @@ pub async fn run_upload_loop(
 
                 let encrypted = enc.encrypt_data(&pkt_data)?;
                 send_tolerant(udp, &encrypted).await?;
+                data_packet_count = data_packet_count.wrapping_add(1);
                 enc.on_data_sent(pkt_data.len());
 
                 // Burst drain: process up to burst_size without yielding
@@ -147,6 +148,7 @@ pub async fn run_upload_loop(
                         Ok(pkt) => {
                             let encrypted = enc.encrypt_data(&pkt)?;
                             send_tolerant(udp, &encrypted).await?;
+                            data_packet_count = data_packet_count.wrapping_add(1);
                             enc.on_data_sent(pkt.len());
                         }
                         Err(mpsc::error::TryRecvError::Empty) => break,

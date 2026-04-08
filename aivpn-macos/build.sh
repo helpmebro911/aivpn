@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$SCRIPT_DIR/build"
 APP_BUNDLE="$BUILD_DIR/Aivpn.app"
+SIGNED_APP_BUNDLE=""
 CONTENTS="$APP_BUNDLE/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -132,11 +133,7 @@ CLIENT_BIN_UNIVERSAL="$PROJECT_DIR/releases/aivpn-client-universal"
 CLIENT_BIN_X86="$PROJECT_DIR/target/release/aivpn-client"
 CLIENT_BIN_ARM="$PROJECT_DIR/target/aarch64-apple-darwin/release/aivpn-client"
 
-if [ -f "$CLIENT_BIN_UNIVERSAL" ]; then
-    cp "$CLIENT_BIN_UNIVERSAL" "$RESOURCES/aivpn-client"
-    chmod +x "$RESOURCES/aivpn-client"
-    echo "  ✅ aivpn-client bundled (Universal Binary: $(file "$RESOURCES/aivpn-client" | sed 's/.*: //'))"
-elif [ -f "$CLIENT_BIN_X86" ] && [ -f "$CLIENT_BIN_ARM" ]; then
+if [ -f "$CLIENT_BIN_X86" ] && [ -f "$CLIENT_BIN_ARM" ]; then
     echo "  🔄 Creating Universal Binary from x86_64 + arm64..."
     lipo -create "$CLIENT_BIN_X86" "$CLIENT_BIN_ARM" -output "$RESOURCES/aivpn-client"
     chmod +x "$RESOURCES/aivpn-client"
@@ -145,6 +142,10 @@ elif [ -f "$CLIENT_BIN_X86" ]; then
     cp "$CLIENT_BIN_X86" "$RESOURCES/aivpn-client"
     chmod +x "$RESOURCES/aivpn-client"
     echo "  ⚠️  aivpn-client bundled (x86_64 only)"
+elif [ -f "$CLIENT_BIN_UNIVERSAL" ]; then
+    cp "$CLIENT_BIN_UNIVERSAL" "$RESOURCES/aivpn-client"
+    chmod +x "$RESOURCES/aivpn-client"
+    echo "  ⚠️  aivpn-client bundled from fallback universal artifact"
 else
     echo "  ⚠️  aivpn-client not found"
     echo "  Run 'cargo build --release --bin aivpn-client' first"
@@ -198,15 +199,17 @@ EOF
 # Sign app (ad-hoc, required for macOS Sequoia)
 # ──────────────────────────────────────────────
 echo "🔐 Signing app..."
-xattr -cr "$APP_BUNDLE" 2>/dev/null
-codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null
-echo "  ✅ Signed ($(du -sh "$APP_BUNDLE" | cut -f1))"
+SIGNED_APP_BUNDLE="$(mktemp -d /tmp/aivpn-signed.XXXXXX)/Aivpn.app"
+ditto "$APP_BUNDLE" "$SIGNED_APP_BUNDLE"
+xattr -cr "$SIGNED_APP_BUNDLE" 2>/dev/null
+codesign --force --deep --sign - "$SIGNED_APP_BUNDLE" 2>/dev/null
+echo "  ✅ Signed ($(du -sh "$SIGNED_APP_BUNDLE" | cut -f1))"
 
 # ──────────────────────────────────────────────
 # Copy app into PKG root + aivpn-client to system path
 # ──────────────────────────────────────────────
 echo "📦 Staging PKG..."
-cp -R "$APP_BUNDLE" "$PKG_ROOT/Applications/Aivpn.app"
+cp -R "$SIGNED_APP_BUNDLE" "$PKG_ROOT/Applications/Aivpn.app"
 
 # Copy aivpn-client to /Library/Application Support/AIVPN/ (helper default path)
 if [ -f "$RESOURCES/aivpn-client" ]; then
@@ -246,7 +249,7 @@ echo "💿 Creating DMG..."
 DMG_OUTPUT="$PROJECT_DIR/releases/aivpn-macos.dmg"
 hdiutil create \
     -volname "AIVPN" \
-    -srcfolder "$APP_BUNDLE" \
+    -srcfolder "$SIGNED_APP_BUNDLE" \
     -ov -format UDZO \
     "$DMG_OUTPUT"
 echo "  ✅ DMG created: $DMG_OUTPUT ($(du -sh "$DMG_OUTPUT" | cut -f1))"
@@ -257,7 +260,7 @@ echo "✅ Build complete!"
 echo ""
 echo "  📦 Installer: $PKG_OUTPUT"
 echo "  💿 DMG:       $DMG_OUTPUT"
-echo "  🖥️  App:       $APP_BUNDLE"
+echo "  🖥️  App:       $SIGNED_APP_BUNDLE"
 echo ""
 echo "To run (development):"
 echo "  open $APP_BUNDLE"

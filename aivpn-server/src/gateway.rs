@@ -815,6 +815,23 @@ impl Gateway {
             // Counter drift recovery — client counter was out of range but session keys match
             (session, counter, is_ratcheted)
         } else {
+            // Small packets from a competing endpoint on the same public IP are
+            // usually stale duplicate control/init traffic after a successful
+            // ratcheted session has already been established. Dropping them is
+            // safer than spawning another ServerHello loop.
+            if packet_data.len() <= 160
+                && self
+                    .session_manager
+                    .has_recent_ratcheted_session_on_other_endpoint(&client_addr, Duration::from_secs(30))
+            {
+                debug!(
+                    "Dropping duplicate-endpoint control/init packet from {} (packet_len={})",
+                    hash_addr(&client_addr),
+                    packet_data.len()
+                );
+                return Err(Error::InvalidPacket("Stale duplicate-endpoint packet"));
+            }
+
             // No session found — try handshake
             // Try to establish a new one from eph_pub in MDH
             if packet_data.len() < TAG_SIZE + mdh_len + 32 {
@@ -997,7 +1014,6 @@ impl Gateway {
         let mut client_db_flush: Option<(String, u64)> = None;
         let (session_id, refresh_tags) = {
             let mut sess = session.lock();
-            sess.counter = counter;
             sess.mark_tag_received(counter);
             sess.last_seen = std::time::Instant::now();
 
@@ -1218,7 +1234,6 @@ impl Gateway {
         
         // Use unified counter for both nonce and tag
         let (nonce, counter) = sess.next_send_nonce();
-        info!("build_packet: counter={}, is_ratcheted={}", counter, sess.is_ratcheted);
         
         // Build padded plaintext: pad_len(u16) || plaintext || random_padding
         // pad_len is inside encryption — invisible to DPI (CRIT-5 fix)

@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -72,6 +72,7 @@ pub struct AivpnClient {
     session_keys: Option<SessionKeys>,
     upload_state: Option<Arc<Mutex<UploadCryptoState>>>,
     transition_recv_keys: Option<SessionKeys>,
+    transition_recv_deadline: Option<Instant>,
     keypair: KeyPair,
     counter: u64,
     send_seq: u32,
@@ -103,6 +104,7 @@ impl AivpnClient {
             session_keys: None,
             upload_state: None,
             transition_recv_keys: None,
+            transition_recv_deadline: None,
             keypair,
             counter: 0,
             send_seq: 0,
@@ -198,6 +200,7 @@ impl AivpnClient {
         self.session_keys = None;
         self.upload_state = None;
         self.transition_recv_keys = None;
+        self.transition_recv_deadline = None;
     }
     
     /// Run the client main loop
@@ -443,15 +446,17 @@ impl AivpnClient {
 
     /// Receive packet from server and write to TUN (using pre-computed mdh_len)
     async fn receive_and_write_packet_with_mdh(&mut self, packet: &[u8], mdh_len: usize) -> Result<()> {
+        if self.transition_recv_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.transition_recv_keys = None;
+            self.transition_recv_deadline = None;
+            self.transition_recv_window.reset();
+        }
+
         let keys = self.session_keys.as_ref()
             .ok_or(Error::Session("No session keys".into()))?;
 
         let decoded = match decode_packet_with_mdh_len(packet, keys, &mut self.recv_window, mdh_len) {
             Ok(decoded) => {
-                if self.transition_recv_keys.take().is_some() {
-                    self.transition_recv_window.reset();
-                    info!("Receive ratchet complete — old inbound keys dropped");
-                }
                 decoded
             }
             Err(primary_err) => {
@@ -459,12 +464,15 @@ impl AivpnClient {
                     return Err(primary_err);
                 };
 
-                decode_packet_with_mdh_len(
+                match decode_packet_with_mdh_len(
                     packet,
                     fallback_keys,
                     &mut self.transition_recv_window,
                     mdh_len,
-                )?
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(_fallback_err) => return Err(primary_err),
+                }
             }
         };
         let inner_header = decoded.header;
@@ -534,6 +542,7 @@ impl AivpnClient {
                 // Keep accepting old inbound keys until the server proves it has
                 // switched too. Outbound traffic moves to ratcheted keys now.
                 self.transition_recv_keys = self.session_keys.clone();
+                self.transition_recv_deadline = Some(Instant::now() + Duration::from_secs(2));
                 self.transition_recv_window = std::mem::take(&mut self.recv_window);
 
                 // Switch to ratcheted keys — outbound uses the new keys immediately.
@@ -597,30 +606,47 @@ impl AivpnClient {
     
     /// Send control message
     async fn send_control(&mut self, payload: &ControlPayload) -> Result<()> {
-        let keys = self.session_keys.as_ref()
-            .ok_or(Error::Session("No session keys".into()))?;
-        
         let mimicry = self.mimicry_engine.as_mut()
             .ok_or(Error::Session("No mimicry engine".into()))?;
-        
+
         // Encode control message
         let encoded = payload.encode()?;
-        
-        let seq_num = self.send_seq as u16;
-        self.send_seq = self.send_seq.wrapping_add(1);
-        let inner_payload = build_inner_packet(InnerType::Control, seq_num, &encoded);
-        
-        // Build packet (no timing for control messages)
-        let aivpn_packet = mimicry.build_packet(
-            &inner_payload,
-            keys,
-            &mut self.counter,
-            None,
-        )?;
-        
+
+        // After the upload pipeline starts, all outbound traffic must share the
+        // same counter/seq timeline. Otherwise control packets and data packets
+        // advance independent counters and the server's tag window drifts.
+        let aivpn_packet = if let Some(upload_state) = &self.upload_state {
+            let mut state = upload_state.lock().expect("upload state poisoned");
+            let seq_num = state.seq;
+            state.seq = state.seq.wrapping_add(1);
+            let inner_payload = build_inner_packet(InnerType::Control, seq_num, &encoded);
+            let keys = state.keys.clone();
+            let packet = mimicry.build_packet(
+                &inner_payload,
+                &keys,
+                &mut state.counter,
+                None,
+            )?;
+            self.send_seq = state.seq as u32;
+            self.counter = state.counter;
+            packet
+        } else {
+            let keys = self.session_keys.as_ref()
+                .ok_or(Error::Session("No session keys".into()))?;
+            let seq_num = self.send_seq as u16;
+            self.send_seq = self.send_seq.wrapping_add(1);
+            let inner_payload = build_inner_packet(InnerType::Control, seq_num, &encoded);
+            mimicry.build_packet(
+                &inner_payload,
+                keys,
+                &mut self.counter,
+                None,
+            )?
+        };
+
         let socket = self.udp_socket.as_ref().unwrap();
         socket.send(&aivpn_packet).await?;
-        
+
         Ok(())
     }
     
