@@ -174,25 +174,48 @@ GitHub Releases automation: the workflow in `.github/workflows/server-release-as
 The easiest way — everything is preconfigured in `docker-compose.yml`.
 
 ```bash
+# Pick the Compose command available on your system
+if docker compose version >/dev/null 2>&1; then
+    AIVPN_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    AIVPN_COMPOSE="docker-compose"
+else
+    echo "Install Docker Compose v2 (`docker-compose-v2` or `docker-compose-plugin`) or legacy `docker-compose`."
+    exit 1
+fi
+
 # Generate server key
 mkdir -p config
 openssl rand 32 > config/server.key
 chmod 600 config/server.key
 
 # Enable NAT (required for internet access from VPN)
+DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
 sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
+sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
+sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
 
 # Fast start from the prebuilt Linux release binary
-AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt docker compose up -d aivpn-server
+AIVPN_SERVER_DOCKERFILE=Dockerfile.prebuilt $AIVPN_COMPOSE up -d aivpn-server
 
 # Or keep the original source build path
-docker compose up -d aivpn-server
+$AIVPN_COMPOSE up -d aivpn-server
 ```
 
 The fast path expects `releases/aivpn-server-linux-x86_64` to be present locally. Build it with `./build-server-release.sh` or download it from Releases before starting Docker.
 
 For a VPS one-command fast deploy, run `./deploy-server-release.sh`. It downloads the release asset, creates `config/server.key` if needed, enables IPv4 forwarding, adds the NAT rule for the default interface, and starts Docker with `Dockerfile.prebuilt`.
+
+If your firewall is enabled, also allow `443/udp` using the tool your system uses:
+
+```bash
+# UFW (Ubuntu/Debian)
+sudo ufw allow 443/udp
+
+# firewalld (RHEL/CentOS/Fedora)
+sudo firewall-cmd --add-port=443/udp --permanent
+sudo firewall-cmd --reload
+```
 
 > The container runs with `network_mode: "host"` and mounts `./config` → `/etc/aivpn` inside the container.
 
@@ -215,8 +238,10 @@ sudo ./target/release/aivpn-server --listen 0.0.0.0:443 --key-file /etc/aivpn/se
 Enable NAT:
 
 ```bash
+DEFAULT_IFACE=$(ip route show default | awk '/default/ {print $5; exit}')
 sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE
+sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null || \
+sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
 ```
 
 ### 3.1 Client Management
@@ -228,8 +253,9 @@ All config is packed into a single **connection key** — one string that the us
 #### Docker
 
 ```bash
+# Reuse the same Compose command detected above
 # Add a new client (prints a connection key)
-docker compose exec aivpn-server aivpn-server \
+$AIVPN_COMPOSE exec aivpn-server aivpn-server \
     --add-client "Alice Phone" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
@@ -249,7 +275,7 @@ docker compose exec aivpn-server aivpn-server \
     --list-clients --clients-db /etc/aivpn/clients.json
 
 # Show a specific client (and its connection key)
-docker compose exec aivpn-server aivpn-server \
+$AIVPN_COMPOSE exec aivpn-server aivpn-server \
     --show-client "Alice Phone" \
     --key-file /etc/aivpn/server.key \
     --clients-db /etc/aivpn/clients.json \
