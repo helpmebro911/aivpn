@@ -208,9 +208,7 @@ fn build_connection_key(
     args: &ServerArgs,
     server_ip: &str,
     server_pub_b64: &str,
-    server_signing_pub_b64: &str,
     psk_b64: &str,
-    bootstrap_descriptors: &[serde_json::Value],
     client_network_config: ClientNetworkConfig,
 ) -> String {
     use base64::Engine;
@@ -218,11 +216,9 @@ fn build_connection_key(
     let json = serde_json::json!({
         "s": server_addr,
         "k": server_pub_b64,
-        "sp": server_signing_pub_b64,
         "p": psk_b64,
         "i": client_network_config.client_ip,
         "n": client_network_config,
-        "bd": bootstrap_descriptors,
     });
     let json_bytes = serde_json::to_string(&json).unwrap();
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json_bytes.as_bytes());
@@ -252,8 +248,6 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
             use base64::Engine;
             let psk_b64 = base64::engine::general_purpose::STANDARD.encode(&client.psk);
             let server_pub = load_server_public_key(args);
-            let server_signing_pub = load_server_signing_public_key(args);
-            let bootstrap_descriptors = load_bootstrap_descriptors(args).unwrap_or_default();
             let client_network_config = db.network_config().client_config(client.vpn_ip).unwrap();
 
             println!("✅ Client '{}' created!", name);
@@ -261,10 +255,9 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
             println!("   VPN IP: {}", client.vpn_ip);
             println!();
 
-            if let (Some(pub_key), Some(signing_pub), Some(ref server_ip)) = (server_pub, server_signing_pub, &args.server_ip) {
+            if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
                 let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
-                let signing_pub_b64 = base64::engine::general_purpose::STANDARD.encode(&signing_pub);
-                let conn_key = build_connection_key(args, server_ip, &pub_b64, &signing_pub_b64, &psk_b64, &bootstrap_descriptors, client_network_config);
+                let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, client_network_config);
                 println!("══ Connection Key (paste into app) ══");
                 println!();
                 println!("{}", conn_key);
@@ -272,9 +265,6 @@ fn handle_add_client(db: &ClientDatabase, name: &str, args: &ServerArgs) {
             } else {
                 if server_pub.is_none() {
                     eprintln!("⚠  --key-file not provided, cannot generate connection key");
-                }
-                if server_signing_pub.is_none() {
-                    eprintln!("⚠  --key-file not provided, cannot derive signing public key");
                 }
                 if args.server_ip.is_none() {
                     eprintln!("⚠  --server-ip not provided, cannot generate connection key");
@@ -351,8 +341,6 @@ fn handle_show_client(db: &ClientDatabase, id: &str, args: &ServerArgs) {
             use base64::Engine;
             let psk_b64 = base64::engine::general_purpose::STANDARD.encode(&client.psk);
             let server_pub = load_server_public_key(args);
-            let server_signing_pub = load_server_signing_public_key(args);
-            let bootstrap_descriptors = load_bootstrap_descriptors(args).unwrap_or_default();
             let client_network_config = db.network_config().client_config(client.vpn_ip);
 
             println!("Client: {} ({})", client.name, client.id);
@@ -367,12 +355,11 @@ fn handle_show_client(db: &ClientDatabase, id: &str, args: &ServerArgs) {
                     .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
                     .unwrap_or_else(|| "never".to_string()));
 
-            if let (Some(pub_key), Some(signing_pub), Some(ref server_ip)) = (server_pub, server_signing_pub, &args.server_ip) {
+            if let (Some(pub_key), Some(ref server_ip)) = (server_pub, &args.server_ip) {
                 match client_network_config {
                     Ok(client_network_config) => {
                         let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key);
-                        let signing_pub_b64 = base64::engine::general_purpose::STANDARD.encode(&signing_pub);
-                        let conn_key = build_connection_key(args, server_ip, &pub_b64, &signing_pub_b64, &psk_b64, &bootstrap_descriptors, client_network_config);
+                        let conn_key = build_connection_key(args, server_ip, &pub_b64, &psk_b64, client_network_config);
                         println!();
                         println!("══ Connection Key ══");
                         println!();
@@ -536,9 +523,7 @@ mod tests {
             &args,
             "203.0.113.10:8443",
             "server-key",
-            "signing-key",
             "psk",
-            &[],
             ClientNetworkConfig {
                 client_ip: Ipv4Addr::new(10, 0, 0, 2),
                 server_vpn_ip: Ipv4Addr::new(10, 0, 0, 1),

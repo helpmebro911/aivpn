@@ -51,8 +51,6 @@ pub struct ClientConfig {
     pub preshared_key: Option<[u8; 32]>,
     pub initial_mask: MaskProfile,
     pub tun_config: TunnelConfig,
-    /// Server's Ed25519 signing public key for authentication (HIGH-6)
-    pub server_signing_pub: [u8; 32],
 }
 
 /// Client state
@@ -621,7 +619,7 @@ impl AivpnClient {
             ControlPayload::BootstrapDescriptorUpdate { descriptor_data } => {
                 match rmp_serde::from_slice::<BootstrapDescriptor>(&descriptor_data) {
                     Ok(descriptor) => {
-                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor, &self.config.server_signing_pub) {
+                        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor) {
                             warn!("Failed to store bootstrap descriptor: {}", e);
                         }
                     }
@@ -631,24 +629,12 @@ impl AivpnClient {
             ControlPayload::KeyRotate { new_eph_pub: _ } => {
                 debug!("Key rotation signal received");
             }
-            ControlPayload::ServerHello { server_eph_pub, signature, network_config } => {
+            ControlPayload::ServerHello { server_eph_pub, signature: _, network_config } => {
                 info!("ServerHello received — completing PFS ratchet");
 
                 if let Some(network_config) = network_config {
                     self.apply_server_network_override(network_config)?;
                 }
-                
-                // Verify Ed25519 signature if server signing key configured (HIGH-6)
-                use ed25519_dalek::{VerifyingKey, Verifier, Signature};
-                let vk = VerifyingKey::from_bytes(&self.config.server_signing_pub)
-                    .map_err(|e| Error::Crypto(format!("Invalid server signing key: {}", e)))?;
-                let mut message = Vec::with_capacity(64);
-                message.extend_from_slice(&server_eph_pub);
-                message.extend_from_slice(&self.keypair.public_key_bytes());
-                let sig = Signature::from_bytes(&signature);
-                vk.verify(&message, &sig)
-                    .map_err(|_| Error::Crypto("ServerHello signature verification failed".into()))?;
-                info!("Server authenticated via Ed25519 signature");
                 
                 // Compute DH2 = client_eph * server_eph for PFS (CRIT-3)
                 let dh2 = self.keypair.compute_shared(&server_eph_pub)?;

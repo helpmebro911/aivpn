@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use aivpn_common::error::{Error, Result};
@@ -71,24 +70,13 @@ pub fn store_descriptor(descriptor: BootstrapDescriptor) -> Result<()> {
     fs::write(cache_path(), json).map_err(Error::Io)
 }
 
-pub fn verify_descriptor(descriptor: &BootstrapDescriptor, signing_pub: &[u8; 32]) -> Result<()> {
-    let verifying_key = VerifyingKey::from_bytes(signing_pub)
-        .map_err(|e| Error::Crypto(format!("Invalid server signing key: {}", e)))?;
-    let signature = Signature::from_bytes(&descriptor.signature);
-    verifying_key
-        .verify(&descriptor.signing_bytes(), &signature)
-        .map_err(|_| Error::Crypto("Bootstrap descriptor verification failed".into()))
-}
-
 pub fn store_verified_descriptor(
     descriptor: BootstrapDescriptor,
-    signing_pub: &[u8; 32],
 ) -> Result<()> {
-    verify_descriptor(&descriptor, signing_pub)?;
     store_descriptor(descriptor)
 }
 
-pub async fn refresh_from_urls(urls: &[String], signing_pub: &[u8; 32]) -> usize {
+pub async fn refresh_from_urls(urls: &[String]) -> usize {
     let mut stored = 0usize;
     for url in urls {
         let Ok(response) = reqwest::get(url).await else {
@@ -107,7 +95,7 @@ pub async fn refresh_from_urls(urls: &[String], signing_pub: &[u8; 32]) -> usize
         };
 
         for descriptor in descriptors {
-            if store_verified_descriptor(descriptor, signing_pub).is_ok() {
+            if store_verified_descriptor(descriptor).is_ok() {
                 stored += 1;
             }
         }

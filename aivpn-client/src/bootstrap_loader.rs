@@ -34,7 +34,7 @@ pub struct MultiChannelLoadStats {
 }
 
 /// Load descriptors from a CDN channel
-async fn load_from_cdn(url: &str, signing_pub: &[u8; 32]) -> Result<Vec<BootstrapDescriptor>> {
+async fn load_from_cdn(url: &str) -> Result<Vec<BootstrapDescriptor>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -52,14 +52,14 @@ async fn load_from_cdn(url: &str, signing_pub: &[u8; 32]) -> Result<Vec<Bootstra
     let body = response.text().await
         .map_err(|e| Error::Session(format!("Failed to read CDN response: {}", e)))?;
     
-    parse_descriptors_from_json(&body, signing_pub)
+    parse_descriptors_from_json(&body)
 }
 
 /// Load descriptors from a Telegram bot channel
 async fn load_from_telegram(
     bot_username: &str, 
     token: Option<&str>,
-    signing_pub: &[u8; 32],
+
 ) -> Result<Vec<BootstrapDescriptor>> {
     // Telegram bot API endpoint
     let api_url = match token {
@@ -86,14 +86,14 @@ async fn load_from_telegram(
     
     // Telegram may wrap descriptors in a message structure
     // Try to extract JSON from the response
-    parse_descriptors_from_json(&body, signing_pub)
+    parse_descriptors_from_json(&body)
 }
 
 /// Load descriptors from a GitHub releases channel
 async fn load_from_github(
     repo: &str,
     asset_name: &str,
-    signing_pub: &[u8; 32],
+
 ) -> Result<Vec<BootstrapDescriptor>> {
     let url = format!(
         "https://api.github.com/repos/{}/releases/latest",
@@ -143,7 +143,7 @@ async fn load_from_github(
                         let asset_body = asset_response.text().await
                             .map_err(|e| Error::Session(format!("Failed to read asset: {}", e)))?;
                         
-                        return parse_descriptors_from_json(&asset_body, signing_pub);
+                        return parse_descriptors_from_json(&asset_body);
                     }
                 }
             }
@@ -157,7 +157,7 @@ async fn load_from_github(
 async fn load_from_ipfs(
     hash: &str,
     gateway: Option<&str>,
-    signing_pub: &[u8; 32],
+
 ) -> Result<Vec<BootstrapDescriptor>> {
     let url = match gateway {
         Some(g) => format!("{}/ipfs/{}", g, hash),
@@ -181,14 +181,14 @@ async fn load_from_ipfs(
     let body = response.text().await
         .map_err(|e| Error::Session(format!("Failed to read IPFS response: {}", e)))?;
     
-    parse_descriptors_from_json(&body, signing_pub)
+    parse_descriptors_from_json(&body)
 }
 
 /// Load descriptors from an Email channel (simulated - actual implementation would use SMTP/IMAP)
 async fn load_from_email(
     _address: &str,
     _subject_pattern: &str,
-    _signing_pub: &[u8; 32],
+
 ) -> Result<Vec<BootstrapDescriptor>> {
     // Email-based loading would require integration with mail servers
     // For now, this is a placeholder that returns an error
@@ -198,7 +198,7 @@ async fn load_from_email(
 /// Parse descriptors from JSON body
 fn parse_descriptors_from_json(
     body: &str,
-    signing_pub: &[u8; 32],
+
 ) -> Result<Vec<BootstrapDescriptor>> {
     // Try parsing as array first
     let descriptors: Vec<BootstrapDescriptor> = serde_json::from_str(body)
@@ -212,7 +212,7 @@ fn parse_descriptors_from_json(
     // Verify each descriptor
     let mut valid_descriptors = Vec::new();
     for descriptor in descriptors {
-        if store_verified_descriptor(descriptor.clone(), signing_pub).is_ok() {
+        if store_verified_descriptor(descriptor.clone()).is_ok() {
             valid_descriptors.push(descriptor);
         }
     }
@@ -223,25 +223,25 @@ fn parse_descriptors_from_json(
 /// Load descriptors from a single channel
 async fn load_from_channel(
     channel: &BootstrapChannel,
-    signing_pub: &[u8; 32],
+
 ) -> ChannelLoadResult {
     let start = std::time::Instant::now();
     
     let result = match channel {
         BootstrapChannel::CDN { url, provider: _ } => {
-            load_from_cdn(url, signing_pub).await
+            load_from_cdn(url).await
         }
         BootstrapChannel::Telegram { bot_username, token } => {
-            load_from_telegram(bot_username, token.as_deref(), signing_pub).await
+            load_from_telegram(bot_username, token.as_deref()).await
         }
         BootstrapChannel::GitHub { repo, asset_name } => {
-            load_from_github(repo, asset_name, signing_pub).await
+            load_from_github(repo, asset_name).await
         }
         BootstrapChannel::IPFS { hash, gateway } => {
-            load_from_ipfs(hash, gateway.as_deref(), signing_pub).await
+            load_from_ipfs(hash, gateway.as_deref()).await
         }
         BootstrapChannel::Email { address, subject_pattern } => {
-            load_from_email(address, subject_pattern, signing_pub).await
+            load_from_email(address, subject_pattern).await
         }
     };
     
@@ -270,7 +270,7 @@ async fn load_from_channel(
 /// Load descriptors from all channels with random order
 pub async fn load_multi_channel(
     config: &BootstrapConfig,
-    signing_pub: &[u8; 32],
+
 ) -> MultiChannelLoadStats {
     let start = std::time::Instant::now();
     
@@ -283,7 +283,7 @@ pub async fn load_multi_channel(
     let mut total_descriptors = 0;
     
     for channel in channels {
-        let result = load_from_channel(channel, signing_pub).await;
+        let result = load_from_channel(channel).await;
         total_descriptors += result.descriptors_loaded;
         results.push(result);
     }
@@ -314,14 +314,14 @@ pub fn random_first_refresh_delay() -> Duration {
 /// Background descriptor refresher
 pub struct BackgroundRefresher {
     config: BootstrapConfig,
-    signing_pub: [u8; 32],
+
 }
 
 impl BackgroundRefresher {
-    pub fn new(config: BootstrapConfig, signing_pub: [u8; 32]) -> Self {
+    pub fn new(config: BootstrapConfig) -> Self {
         Self {
             config,
-            signing_pub,
+
         }
     }
     
@@ -344,7 +344,7 @@ impl BackgroundRefresher {
             }
             
             // Load from multiple channels
-            let stats = load_multi_channel(&self.config, &self.signing_pub).await;
+            let stats = load_multi_channel(&self.config).await;
             
             tracing::info!(
                 "Bootstrap refresh: {}/{} channels succeeded, {} descriptors loaded in {}ms",

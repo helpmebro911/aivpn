@@ -218,7 +218,7 @@ async fn main() {
     let file_config = load_client_file_config(args.config.as_deref());
 
     // Parse connection key or individual args
-    let (server_addr, server_key_b64, server_signing_key_b64, psk_bytes, network_config, inline_descriptors, bootstrap_descriptor_urls, tun_name_fixed, full_tunnel) = if let Some(ref conn_key) = args.connection_key {
+    let (server_addr, server_key_b64, psk_bytes, network_config, inline_descriptors, bootstrap_descriptor_urls, tun_name_fixed, full_tunnel) = if let Some(ref conn_key) = args.connection_key {
         let payload = conn_key.trim().strip_prefix("aivpn://").unwrap_or(conn_key.trim());
         let json_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
@@ -237,10 +237,6 @@ async fn main() {
         }).to_string();
         let k = json["k"].as_str().unwrap_or_else(|| {
             error!("Connection key missing server key (\"k\")");
-            std::process::exit(1);
-        }).to_string();
-        let signing = json["sp"].as_str().unwrap_or_else(|| {
-            error!("Connection key missing server signing key (\"sp\")");
             std::process::exit(1);
         }).to_string();
         let psk: Option<Vec<u8>> = json["p"].as_str().and_then(|p| {
@@ -275,7 +271,6 @@ async fn main() {
         (
             s,
             k,
-            signing,
             psk,
             network_config,
             inline_descriptors,
@@ -296,12 +291,6 @@ async fn main() {
             error!("Either --connection-key or --server + --server-key required");
             std::process::exit(1);
         });
-        let signing = args.server_signing_key.clone()
-            .or_else(|| file_config.as_ref().and_then(|config| config.server_signing_public_key.clone()))
-            .unwrap_or_else(|| {
-            error!("Server signing key is required: provide --server-signing-key or set server_signing_public_key in config/connection key");
-            std::process::exit(1);
-        });
         let psk = file_config.as_ref()
             .and_then(|config| config.preshared_key.as_ref())
             .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok());
@@ -315,7 +304,6 @@ async fn main() {
         (
             server,
             key,
-            signing,
             psk,
             network_config,
             file_config.as_ref().and_then(|config| config.bootstrap_descriptors.clone()).unwrap_or_default(),
@@ -329,7 +317,6 @@ async fn main() {
     info!("Connecting to server: {}", server_addr);
     
     let server_public_key = decode_base64_key("server key", &server_key_b64);
-    let server_signing_pub = decode_base64_key("server signing key", &server_signing_key_b64);
 
     // Parse PSK
     let preshared_key: Option<[u8; 32]> = psk_bytes.and_then(|v| {
@@ -345,11 +332,11 @@ async fn main() {
     let network_config = network_config;
 
     for descriptor in inline_descriptors {
-        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor, &server_signing_pub) {
+        if let Err(e) = bootstrap_cache::store_verified_descriptor(descriptor) {
             warn!("Failed to store bootstrap descriptor from config/key: {}", e);
         }
     }
-    let fetched = bootstrap_cache::refresh_from_urls(&bootstrap_descriptor_urls, &server_signing_pub).await;
+    let fetched = bootstrap_cache::refresh_from_urls(&bootstrap_descriptor_urls).await;
     if fetched > 0 {
         info!("Fetched {} bootstrap descriptor(s) from passive URLs", fetched);
     }
@@ -372,7 +359,7 @@ async fn main() {
     // Load from multi-channel if configured
     if !bootstrap_config.channels.is_empty() {
         info!("Loading bootstrap descriptors from {} channels", bootstrap_config.channels.len());
-        let stats = bootstrap_loader::load_multi_channel(&bootstrap_config, &server_signing_pub).await;
+        let stats = bootstrap_loader::load_multi_channel(&bootstrap_config).await;
         info!(
             "Multi-channel bootstrap: {}/{} succeeded, {} descriptors loaded in {}ms",
             stats.successful_channels,
@@ -441,7 +428,6 @@ async fn main() {
             server_public_key,
             preshared_key,
             initial_mask,
-            server_signing_pub,
             tun_config: TunnelConfig::from_network_config(
                 tun_name.clone(),
                 network_config,
