@@ -111,6 +111,7 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 struct ClientFileConfig {
     server_addr: Option<String>,
     server_public_key: Option<String>,
+    #[allow(dead_code)]
     server_signing_public_key: Option<String>,
     preshared_key: Option<String>,
     tun_name: Option<String>,

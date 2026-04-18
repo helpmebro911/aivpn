@@ -1176,15 +1176,8 @@ impl Gateway {
         let mut tag = [0u8; TAG_SIZE];
         tag.copy_from_slice(&packet_data[0..TAG_SIZE]);
         
-        // Existing-session parsing uses the runtime primary mask layout.
-        let (packet_mdh_len, handshake_mdh_len, _eph_offset, _eph_len) = self.mask_catalog.packet_layout();
-        debug!(
-            "Server using packet layout: packet_mdh_len={}, handshake_mdh_len={}, eph_offset={}, eph_len={}",
-            packet_mdh_len,
-            handshake_mdh_len,
-            _eph_offset,
-            _eph_len
-        );
+        // Default layout from runtime primary mask (used for handshake fallback).
+        let (catalog_mdh_len, catalog_hs_mdh_len, _eph_offset, _eph_len) = self.mask_catalog.packet_layout();
         let mut is_new_session = false;
         let (session, counter, is_ratcheted_tag) = if let Some(session) = self.session_manager.get_session_by_tag(&tag) {
             // Existing session — validate tag
@@ -1417,8 +1410,11 @@ impl Gateway {
                     match self.session_manager.build_mask_update_packet(&session, &runtime_mask) {
                         Ok(packet) => {
                             self.udp_socket.as_ref().unwrap().send_to(&packet, client_addr).await?;
-                            let session_id = session.lock().session_id;
-                            self.session_manager.update_session_mask(&session_id, runtime_mask);
+                            // NOTE: Do NOT call update_session_mask here.
+                            // The client still sends packets with bootstrap mask layout
+                            // until it processes MaskUpdate. Keep sess.mask = bootstrap
+                            // so per-session decryption uses bootstrap layout, with
+                            // catalog (runtime) layout as fallback for transition.
                         }
                         Err(e) => {
                             warn!("Failed to send initial runtime MaskUpdate: {}", e);
@@ -1436,6 +1432,22 @@ impl Gateway {
         };
         
         // Parse packet — pad_len is inside encrypted area (CRIT-5 fix).
+        // Use the session's own mask layout for decryption. This is critical
+        // because the client may still be using its bootstrap mask before
+        // receiving and applying a MaskUpdate from the server.
+        // We try both the session mask layout AND the catalog (runtime) layout
+        // to handle the transition window.
+        let (session_mdh_len, session_hs_mdh_len) = {
+            let sess = session.lock();
+            if let Some(ref mask) = sess.mask {
+                let (p, h, _, _) = packet_layout_for_mask(mask);
+                (p, h)
+            } else {
+                (catalog_mdh_len, catalog_hs_mdh_len)
+            }
+        };
+        let packet_mdh_len = session_mdh_len;
+        let handshake_mdh_len = session_hs_mdh_len;
         // Android retransmits the initial handshake packet with the client
         // eph_pub still embedded inside the MDH. Once a session already exists,
         // those retries validate against the existing tag window, so the
@@ -1444,18 +1456,32 @@ impl Gateway {
             let sess = session.lock();
             !sess.is_ratcheted && packet_data.len() >= TAG_SIZE + handshake_mdh_len + 16
         };
-        let payload_offsets: Vec<usize> = if is_new_session {
+        let mut payload_offsets: Vec<usize> = if is_new_session {
             vec![TAG_SIZE + handshake_mdh_len]
         } else if is_pre_ratchet_retry && handshake_mdh_len != packet_mdh_len {
             vec![TAG_SIZE + packet_mdh_len, TAG_SIZE + handshake_mdh_len]
         } else {
             vec![TAG_SIZE + packet_mdh_len]
         };
+        // During mask transition (bootstrap → runtime), also try the catalog
+        // (runtime) layout in case the client already applied MaskUpdate.
+        if catalog_mdh_len != session_mdh_len {
+            let catalog_offset = TAG_SIZE + catalog_mdh_len;
+            if !payload_offsets.contains(&catalog_offset) {
+                payload_offsets.push(catalog_offset);
+            }
+        }
 
         let (payload_offset, padded_plaintext) = {
             let sess = session.lock();
             let nonce = self.compute_nonce(counter);
-            let key = if is_ratcheted_tag {
+            // For new sessions, always use initial keys for decryption since the
+            // client hasn't received ServerHello yet and is still sending with
+            // initial keys. Only use ratcheted keys when the client proves it
+            // has switched by sending a ratcheted tag on an existing session.
+            let key = if is_new_session {
+                &sess.keys.session_key
+            } else if is_ratcheted_tag {
                 &sess.ratcheted_keys.as_ref()
                     .ok_or(Error::InvalidPacket("Ratcheted keys missing"))?
                     .session_key

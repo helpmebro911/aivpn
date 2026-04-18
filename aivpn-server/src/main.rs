@@ -1,7 +1,7 @@
 //! AIVPN Server Binary
 
 use aivpn_server::{AivpnServer, ServerArgs, ClientDatabase};
-use aivpn_server::gateway::{GatewayConfig, build_bootstrap_descriptors, derive_server_signing_key};
+use aivpn_server::gateway::GatewayConfig;
 use aivpn_server::neural::NeuralConfig;
 use aivpn_common::crypto;
 use aivpn_common::mask::MaskProfile;
@@ -170,36 +170,6 @@ fn load_server_public_key(args: &ServerArgs) -> Option<[u8; 32]> {
         key.copy_from_slice(&key_data);
         let kp = crypto::KeyPair::from_private_key(key);
         Some(kp.public_key_bytes())
-    })
-}
-
-fn load_server_signing_public_key(args: &ServerArgs) -> Option<[u8; 32]> {
-    args.key_file.as_ref().and_then(|key_file| {
-        let key_data = std::fs::read(key_file).ok()?;
-        if key_data.len() != 32 { return None; }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&key_data);
-        let signing_key = derive_server_signing_key(&key);
-        Some(signing_key.verifying_key().to_bytes())
-    })
-}
-
-fn load_bootstrap_descriptors(args: &ServerArgs) -> Option<Vec<serde_json::Value>> {
-    args.key_file.as_ref().and_then(|key_file| {
-        let key_data = std::fs::read(key_file).ok()?;
-        if key_data.len() != 32 { return None; }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&key_data);
-        let signing_key = derive_server_signing_key(&key);
-        let file_config = load_server_file_config(resolve_config_path(args).as_deref());
-        let bootstrap_masks = load_bootstrap_masks(file_config.as_ref()).ok()?;
-        let descriptors = build_bootstrap_descriptors(&key, &signing_key, &bootstrap_masks);
-        Some(
-            descriptors
-                .into_iter()
-                .filter_map(|descriptor| serde_json::to_value(descriptor).ok())
-                .collect(),
-        )
     })
 }
 

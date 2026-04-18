@@ -57,6 +57,7 @@ struct HeaderObservation {
 }
 
 /// Statistical mode (peak in distribution)
+#[allow(dead_code)]
 struct Mode {
     center: f32,
     std_dev: f32,
