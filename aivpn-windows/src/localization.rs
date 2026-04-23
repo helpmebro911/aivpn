@@ -117,6 +117,32 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "client_not_found") => "Client binary not found",
         (Lang::Ru, "client_not_found") => "Клиент не найден",
 
+        // Recording
+        (Lang::En, "record_new_mask") => "Record New Mask",
+        (Lang::Ru, "record_new_mask") => "Записать новую маску",
+        (Lang::En, "record_service_name") => "Service name",
+        (Lang::Ru, "record_service_name") => "Имя сервиса",
+        (Lang::En, "stop_recording") => "Stop Recording",
+        (Lang::Ru, "stop_recording") => "Остановить запись",
+        (Lang::En, "recording_ready") => "Ready to record",
+        (Lang::Ru, "recording_ready") => "Готово к записи",
+        (Lang::En, "recording_starting") => "Starting recording...",
+        (Lang::Ru, "recording_starting") => "Запуск записи...",
+        (Lang::En, "recording_active") => "Recording in progress — use the service normally",
+        (Lang::Ru, "recording_active") => "Запись идёт — используйте сервис",
+        (Lang::En, "recording_stopping") => "Stopping recording...",
+        (Lang::Ru, "recording_stopping") => "Остановка записи...",
+        (Lang::En, "recording_analyzing") => "Server analyzing traffic...",
+        (Lang::Ru, "recording_analyzing") => "Сервер анализирует трафик...",
+        (Lang::En, "recording_success") => "Mask recorded",
+        (Lang::Ru, "recording_success") => "Маска записана",
+        (Lang::En, "recording_failed") => "Recording failed",
+        (Lang::Ru, "recording_failed") => "Запись не удалась",
+        (Lang::En, "recording_self_test_failed") => "Self-test failed",
+        (Lang::Ru, "recording_self_test_failed") => "Самотест не пройден",
+        (Lang::En, "dismiss") => "Dismiss",
+        (Lang::Ru, "dismiss") => "Закрыть",
+
         // Default fallback
         (_, _) => "???"
     }

@@ -3,7 +3,7 @@
 //! Dark theme, compact, 360×480 window.
 
 use eframe::egui::{self, Color32, CornerRadius, RichText, Vec2};
-use crate::vpn_manager::{ConnectionState, format_bytes};
+use crate::vpn_manager::{ConnectionState, RecordingState, format_bytes};
 use crate::localization::{Lang, t};
 use crate::AivpnApp;
 use crate::APP_VERSION;
@@ -34,6 +34,18 @@ pub fn draw_main_ui(ui: &mut egui::Ui, app: &mut AivpnApp) {
     // Traffic stats (when connected)
     if app.vpn.is_connected() {
         draw_traffic_stats(ui, app);
+        ui.add_space(4.0);
+    }
+
+    // Recording result banner
+    draw_recording_result(ui, app);
+
+    // Recording section (when connected and recording capable)
+    if app.vpn.is_connected()
+        && app.vpn.recording_capability_known
+        && app.vpn.can_record_masks
+    {
+        draw_recording_section(ui, app);
         ui.add_space(4.0);
     }
 
@@ -493,4 +505,144 @@ fn draw_connect_button(ui: &mut egui::Ui, app: &mut AivpnApp) {
             }
         }
     });
+}
+
+// ── Recording UI ────────────────────────────────────────────────────────────
+
+fn draw_recording_result(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    let result = match &app.vpn.last_recording_result {
+        Some(r) => r.clone(),
+        None => return,
+    };
+
+    let (border_color, title) = if result.succeeded {
+        (GREEN, t(app.lang, "recording_success"))
+    } else {
+        (RED, t(app.lang, "recording_failed"))
+    };
+
+    ui.add_space(4.0);
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .stroke(egui::Stroke::new(1.0, border_color))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(title).size(12.0).strong().color(border_color));
+                    ui.label(RichText::new(&result.details).size(11.0).color(DIM));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    if ui
+                        .small_button(RichText::new(t(app.lang, "dismiss")).size(11.0).color(DIM))
+                        .clicked()
+                    {
+                        app.vpn.clear_recording_result();
+                    }
+                });
+            });
+        });
+}
+
+fn draw_recording_section(ui: &mut egui::Ui, app: &mut AivpnApp) {
+    ui.add_space(4.0);
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            // Section header
+            ui.label(
+                RichText::new(t(app.lang, "record_new_mask"))
+                    .size(13.0)
+                    .color(DIM)
+                    .strong(),
+            );
+
+            ui.add_space(6.0);
+
+            // Service name input
+            ui.label(RichText::new(t(app.lang, "record_service_name")).size(11.0).color(DIM));
+            ui.add(
+                egui::TextEdit::singleline(&mut app.recording_service_name)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("e.g. youtube, telegram"),
+            );
+
+            ui.add_space(6.0);
+
+            // Record / Stop button
+            let is_active = app.vpn.is_recording();
+            let disabled = app.vpn.recording_button_disabled();
+
+            let (btn_label, btn_icon, btn_color) = if is_active {
+                (t(app.lang, "stop_recording"), "⏹", RED)
+            } else {
+                (t(app.lang, "record_new_mask"), "🔴", ORANGE)
+            };
+
+            ui.add_enabled_ui(!disabled, |ui| {
+                let btn = egui::Button::new(
+                    RichText::new(format!("{} {}", btn_icon, btn_label))
+                        .size(14.0)
+                        .color(Color32::WHITE)
+                        .strong(),
+                )
+                .fill(btn_color)
+                .corner_radius(CornerRadius::same(6))
+                .min_size(Vec2::new(ui.available_width(), 32.0));
+
+                if ui.add(btn).clicked() {
+                    if is_active {
+                        app.vpn.stop_recording();
+                    } else {
+                        let service = if app.recording_service_name.trim().is_empty() {
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            format!("mask_{}", ts)
+                        } else {
+                            app.recording_service_name.trim().to_string()
+                        };
+                        app.recording_service_name = service.clone();
+                        app.vpn.start_recording(&service);
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // Status text
+            let (status_text, status_color) = recording_status_display(&app.vpn.recording_state, app.lang);
+            ui.label(RichText::new(status_text).size(11.0).color(status_color));
+        });
+}
+
+fn recording_status_display(state: &RecordingState, lang: Lang) -> (String, Color32) {
+    match state {
+        RecordingState::Idle => (t(lang, "recording_ready").to_string(), GREEN),
+        RecordingState::Starting(_) => (t(lang, "recording_starting").to_string(), ORANGE),
+        RecordingState::Recording(_) => (t(lang, "recording_active").to_string(), GREEN),
+        RecordingState::Stopping(_) => (t(lang, "recording_stopping").to_string(), ORANGE),
+        RecordingState::Analyzing(_) => (t(lang, "recording_analyzing").to_string(), ORANGE),
+        RecordingState::Success(_, mask_id) => {
+            let base = t(lang, "recording_success").to_string();
+            if let Some(id) = mask_id {
+                (format!("{}: {}", base, id), GREEN)
+            } else {
+                (base, GREEN)
+            }
+        }
+        RecordingState::Failed(_, reason) => {
+            let lower = reason.to_lowercase();
+            let label = if lower.contains("self-test") || lower.contains("verification") {
+                t(lang, "recording_self_test_failed")
+            } else {
+                t(lang, "recording_failed")
+            };
+            (format!("{}: {}", label, reason), RED)
+        }
+    }
 }

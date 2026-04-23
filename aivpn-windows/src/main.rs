@@ -27,31 +27,24 @@ fn main() -> eframe::Result<()> {
     write_startup_log(&log_path, "startup: entered main");
     write_startup_log(&log_path, "startup: using wgpu renderer path");
 
-    // Try to load app icon from .png file next to the exe
-    let icon = if let Ok(exe) = std::env::current_exe() {
-        let icon_path = exe.parent().unwrap_or(std::path::Path::new("."))
-            .join("aivpn.png");
-        if icon_path.exists() {
-            match image::open(&icon_path) {
-                Ok(img) => {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    Some(Box::new(egui::IconData {
-                        rgba: rgba.into_raw(),
-                        width: w,
-                        height: h,
-                    }))
-                }
-                Err(e) => {
-                    eprintln!("Icon load error: {}", e);
-                    None
-                }
+    // Embed app icon directly into the binary — no external file needed
+    let icon = {
+        let png_bytes = include_bytes!("../assets/aivpn_preview.png");
+        match image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                Some(Box::new(egui::IconData {
+                    rgba: rgba.into_raw(),
+                    width: w,
+                    height: h,
+                }))
             }
-        } else {
-            None
+            Err(e) => {
+                eprintln!("Icon decode error: {}", e);
+                None
+            }
         }
-    } else {
-        None
     };
 
     let mut viewport = egui::ViewportBuilder::default()
@@ -156,6 +149,8 @@ pub struct AivpnApp {
     editing_key_idx: Option<usize>,
     error_message: Option<String>,
     error_timer: Option<std::time::Instant>,
+    // Recording UI state
+    recording_service_name: String,
 }
 
 impl AivpnApp {
@@ -172,6 +167,7 @@ impl AivpnApp {
             editing_key_idx: None,
             error_message: None,
             error_timer: None,
+            recording_service_name: String::new(),
         }
     }
 

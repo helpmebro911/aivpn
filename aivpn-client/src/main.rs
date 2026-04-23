@@ -459,9 +459,21 @@ async fn main() {
             Ok(mut client) => {
                 info!("Client initialized successfully (TUN: {})", tun_name);
                 
-                // Write initial stats file
-                let _ = std::fs::write("/var/run/aivpn/traffic.stats", "sent:0,received:0");
-                let _ = std::fs::write("/tmp/aivpn-traffic.stats", "sent:0,received:0");
+                // Write initial stats file (platform-appropriate paths)
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(local_app) = std::env::var_os("LOCALAPPDATA") {
+                        let dir = std::path::PathBuf::from(local_app).join("AIVPN");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::fs::write(dir.join("traffic.stats"), "sent:0,received:0");
+                    }
+                    let _ = std::fs::write(std::env::temp_dir().join("aivpn-traffic.stats"), "sent:0,received:0");
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = std::fs::write("/var/run/aivpn/traffic.stats", "sent:0,received:0");
+                    let _ = std::fs::write("/tmp/aivpn-traffic.stats", "sent:0,received:0");
+                }
                 aivpn_client::record_cmd::reset_local_status();
 
                 match client.run(shutdown.clone()).await {

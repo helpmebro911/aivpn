@@ -112,6 +112,9 @@ pub struct Tunnel {
     /// Active IPv6 interface name saved before we add the blackhole route.
     /// Used to restore the route on disconnect instead of guessing (e.g. hard-coding en0).
     saved_ipv6_iface: Option<String>,
+    /// Windows: wintun adapter interface index for explicit route binding.
+    /// Without this, `route add` may bind VPN routes to the physical NIC.
+    wintun_if_index: Option<String>,
 }
 
 impl Tunnel {
@@ -123,6 +126,7 @@ impl Tunnel {
             saved_default_gw: None,
             server_ip: None,
             saved_ipv6_iface: None,
+            wintun_if_index: None,
         }
     }
 
@@ -258,7 +262,15 @@ impl Tunnel {
         self.configure_linux()?;
         
         #[cfg(target_os = "windows")]
-        self.configure_windows()?;
+        {
+            self.wintun_if_index = self.find_wintun_interface_index();
+            if let Some(ref idx) = self.wintun_if_index {
+                info!("Wintun interface index: {}", idx);
+            } else {
+                error!("Could not determine wintun interface index — routes may bind to wrong adapter");
+            }
+            self.configure_windows()?;
+        }
         
         Ok(())
     }
@@ -450,6 +462,31 @@ impl Tunnel {
     }
     
     // ──────────────────── Windows ────────────────────
+
+    /// Discover the wintun adapter's interface index via `netsh`.
+    /// Used to pass `IF <index>` to `route add` so Windows binds the route
+    /// to wintun rather than the physical NIC with the best next-hop metric.
+    #[cfg(target_os = "windows")]
+    fn find_wintun_interface_index(&self) -> Option<String> {
+        let output = std::process::Command::new("netsh")
+            .args(["interface", "ipv4", "show", "interfaces"])
+            .output()
+            .ok()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let tun_lower = self.config.tun_name.to_lowercase();
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.to_lowercase().ends_with(&tun_lower) {
+                if let Some(idx) = trimmed.split_whitespace().next() {
+                    if idx.parse::<u32>().is_ok() {
+                        return Some(idx.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
     
     /// Configure TUN device on Windows (netsh / route add)
     #[cfg(target_os = "windows")]
@@ -459,10 +496,24 @@ impl Tunnel {
         let network_addr = vpn_network.network_addr().to_string();
         let tun_netmask = self.config.tun_netmask.clone();
 
+        // Explicitly bind the VPN subnet route to the wintun interface.
+        // Without IF, Windows may attach it to the physical NIC.
+        let (add_args, delete_args): (Vec<&str>, Vec<&str>) = if let Some(ref idx) = self.wintun_if_index {
+            (
+                vec!["add", network_addr.as_str(), "mask", tun_netmask.as_str(), peer_addr, "IF", idx.as_str()],
+                vec!["delete", network_addr.as_str(), "mask", tun_netmask.as_str(), "IF", idx.as_str()],
+            )
+        } else {
+            (
+                vec!["add", network_addr.as_str(), "mask", tun_netmask.as_str(), peer_addr],
+                vec!["delete", network_addr.as_str(), "mask", tun_netmask.as_str()],
+            )
+        };
+
         self.add_windows_route_with_retry(
-            &["add", network_addr.as_str(), "mask", tun_netmask.as_str(), peer_addr],
-            &["delete", network_addr.as_str(), "mask", tun_netmask.as_str()],
-            &format!("Added route {}/{} via {} (Windows)", network_addr, self.config.prefix_len, peer_addr),
+            &add_args,
+            &delete_args,
+            &format!("Added route {}/{} via {} IF {} (Windows)", network_addr, self.config.prefix_len, peer_addr, self.wintun_if_index.as_deref().unwrap_or("auto")),
             &format!("VPN subnet route {}/{}", network_addr, self.config.prefix_len),
         )?;
         
@@ -702,10 +753,22 @@ impl Tunnel {
         }
         
         // 3. Route all traffic through TUN via 0/1 + 128/1 trick
+        //    Explicitly bind to wintun IF to prevent Windows from attaching
+        //    these routes to the physical NIC.
         for net in [("0.0.0.0", "128.0.0.0"), ("128.0.0.0", "128.0.0.0")] {
-            let success_message = format!("Added full-tunnel route: {}/1 via {}", net.0, peer_addr);
-            let add_args = ["add", net.0, "mask", net.1, peer_addr.as_str(), "metric", "5"];
-            let delete_args = ["delete", net.0, "mask", net.1];
+            let if_suffix = self.wintun_if_index.as_deref().unwrap_or("auto");
+            let success_message = format!("Added full-tunnel route: {}/1 via {} IF {}", net.0, peer_addr, if_suffix);
+            let (add_args, delete_args): (Vec<&str>, Vec<&str>) = if let Some(ref idx) = self.wintun_if_index {
+                (
+                    vec!["add", net.0, "mask", net.1, peer_addr.as_str(), "metric", "5", "IF", idx.as_str()],
+                    vec!["delete", net.0, "mask", net.1],
+                )
+            } else {
+                (
+                    vec!["add", net.0, "mask", net.1, peer_addr.as_str(), "metric", "5"],
+                    vec!["delete", net.0, "mask", net.1],
+                )
+            };
             self.add_windows_route_with_retry(
                 &add_args,
                 &delete_args,

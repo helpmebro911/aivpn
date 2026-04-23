@@ -368,9 +368,29 @@ impl AivpnClient {
         let stats_bytes_sent = self.bytes_sent.clone();
         let stats_bytes_received = self.bytes_received.clone();
         let stats_task = tokio::spawn(async move {
-            // Write initial stats to both locations (async to avoid blocking tokio thread)
-            let _ = tokio::fs::write("/var/run/aivpn/traffic.stats", "sent:0,received:0").await;
-            let _ = tokio::fs::write("/tmp/aivpn-traffic.stats", "sent:0,received:0").await;
+            // Determine platform-appropriate stats paths
+            #[cfg(target_os = "windows")]
+            let stats_paths: Vec<std::path::PathBuf> = {
+                let mut paths = Vec::new();
+                if let Some(local_app) = std::env::var_os("LOCALAPPDATA") {
+                    let dir = std::path::PathBuf::from(local_app).join("AIVPN");
+                    let _ = tokio::fs::create_dir_all(&dir).await;
+                    paths.push(dir.join("traffic.stats"));
+                }
+                let tmp = std::env::temp_dir().join("aivpn-traffic.stats");
+                paths.push(tmp);
+                paths
+            };
+            #[cfg(not(target_os = "windows"))]
+            let stats_paths: Vec<std::path::PathBuf> = vec![
+                std::path::PathBuf::from("/var/run/aivpn/traffic.stats"),
+                std::path::PathBuf::from("/tmp/aivpn-traffic.stats"),
+            ];
+
+            // Write initial stats
+            for path in &stats_paths {
+                let _ = tokio::fs::write(path, "sent:0,received:0").await;
+            }
             info!("Initial stats written");
             
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -382,8 +402,9 @@ impl AivpnClient {
                 let sent = stats_bytes_sent.load(Ordering::Relaxed);
                 let received = stats_bytes_received.load(Ordering::Relaxed);
                 let stats = format!("sent:{},received:{}", sent, received);
-                let _ = tokio::fs::write("/var/run/aivpn/traffic.stats", &stats).await;
-                let _ = tokio::fs::write("/tmp/aivpn-traffic.stats", &stats).await;
+                for path in &stats_paths {
+                    let _ = tokio::fs::write(path, &stats).await;
+                }
             }
         });
 

@@ -6,7 +6,27 @@
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-const RECORDING_STATUS_PATHS: [&str; 2] = ["/var/run/aivpn/recording.status", "/tmp/aivpn-recording.status"];
+/// Returns platform-appropriate paths for recording status files.
+pub fn recording_status_paths() -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut paths = Vec::new();
+        if let Some(local_app) = std::env::var_os("LOCALAPPDATA") {
+            let dir = std::path::PathBuf::from(local_app).join("AIVPN");
+            let _ = std::fs::create_dir_all(&dir);
+            paths.push(dir.join("recording.status"));
+        }
+        paths.push(std::env::temp_dir().join("aivpn-recording.status"));
+        paths
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![
+            std::path::PathBuf::from("/var/run/aivpn/recording.status"),
+            std::path::PathBuf::from("/tmp/aivpn-recording.status"),
+        ]
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingLocalStatus {
@@ -43,8 +63,8 @@ fn current_timestamp_ms() -> u64 {
 
 fn write_status(status: &RecordingLocalStatus) {
     if let Ok(json) = serde_json::to_vec(status) {
-        for path in RECORDING_STATUS_PATHS {
-            let _ = std::fs::write(path, &json);
+        for path in recording_status_paths() {
+            let _ = std::fs::write(&path, &json);
         }
     }
 }
@@ -54,7 +74,7 @@ pub fn reset_local_status() {
 }
 
 pub fn read_local_status() -> Option<RecordingLocalStatus> {
-    RECORDING_STATUS_PATHS.iter().find_map(|path| {
+    recording_status_paths().iter().find_map(|path| {
         let data = std::fs::read(path).ok()?;
         serde_json::from_slice::<RecordingLocalStatus>(&data).ok()
     })
