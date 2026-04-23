@@ -106,6 +106,7 @@ COPY aivpn-server aivpn-server/
 COPY aivpn-client aivpn-client/
 COPY aivpn-android-core aivpn-android-core/
 COPY aivpn-windows aivpn-windows/
+COPY mask-assets mask-assets/
 
 RUN cargo build --release --target "$TARGET_TRIPLE" -p "$CRATE_NAME" --bin "$BINARY_NAME"
 EOF
