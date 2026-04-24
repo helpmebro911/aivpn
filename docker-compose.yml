@@ -19,7 +19,7 @@ services:
     memswap_limit: 800m
     cpu_shares: 512
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=aivpn_server=info,aivpn_common=info,warn
       - RUST_BACKTRACE=1
     volumes:
       - ./config:/etc/aivpn
@@ -27,8 +27,8 @@ services:
     logging:
       driver: "json-file"
       options:
-        max-size: "100m"
-        max-file: "5"
+        max-size: "50m"
+        max-file: "3"
     labels:
       - "com.aivpn.service=gateway"
       - "com.aivpn.version=0.3.0"

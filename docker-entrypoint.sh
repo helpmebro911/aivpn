@@ -32,4 +32,7 @@ if [ ! -f "$KEY_PATH" ]; then
     echo "Generated $KEY_PATH"
 fi
 
+# Default log level to info if not set (prevents debug-level log floods)
+export RUST_LOG="${RUST_LOG:-info}"
+
 exec /usr/local/bin/aivpn-server "$@"

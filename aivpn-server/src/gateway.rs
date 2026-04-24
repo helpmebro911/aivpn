@@ -605,8 +605,9 @@ impl Gateway {
                     warn!("Could not take TUN writer — falling back to forward_packet");
                 }
                 
+                let client_db = self.client_db.clone();
                 tokio::spawn(async move {
-                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, server_vpn_ip, recorder).await;
+                    Self::tun_read_loop(tun_reader, tun_tx, sessions, socket, mask, server_vpn_ip, recorder, client_db).await;
                 });
                 info!("TUN read loop spawned");
             }
@@ -823,6 +824,7 @@ impl Gateway {
         mask: MaskProfile,
         server_vpn_ip: Ipv4Addr,
         recorder: Option<Arc<RecordingManager>>,
+        client_db: Option<Arc<ClientDatabase>>,
     ) {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
         let server_ip = server_vpn_ip;
@@ -877,7 +879,24 @@ impl Gateway {
                         let session_mdh = sess.mask.as_ref()
                             .map(packet_mdh_bytes_for_mask)
                             .unwrap_or_else(|| mask.header_template.clone());
+                        // Pre-accumulate downlink bytes estimate (IP packet + overhead)
+                        // This avoids a second lock after send_to
+                        let estimated_out = (n + 64) as u64; // packet + AIVPN overhead
+                        sess.pending_bytes_out = sess.pending_bytes_out.saturating_add(estimated_out);
+                        // Flush downlink-only traffic to client_db when threshold reached
+                        let flush_out = if sess.pending_bytes_out >= 64 * 1024 {
+                            let bytes = sess.pending_bytes_out;
+                            let cid = sess.client_id.clone();
+                            sess.pending_bytes_out = 0;
+                            cid.map(|c| (c, bytes))
+                        } else {
+                            None
+                        };
                         drop(sess); // Release lock BEFORE expensive encryption
+                        // Flush outside lock
+                        if let (Some(ref db), Some((cid, bytes))) = (&client_db, flush_out) {
+                            db.record_traffic(&cid, 0, bytes);
+                        }
                         
                         // Build inner payload: Data type + IP packet
                         let inner_header = InnerHeader {
@@ -927,20 +946,23 @@ impl Gateway {
                     // Send to client
                     if let Err(e) = socket.send_to(&aivpn_packet, client_addr).await {
                         debug!("TUN: send failed: {}", e);
-                    } else if let Some(ref recorder) = recorder {
-                        if recorder.is_recording(&session_id) {
-                            let meta = aivpn_common::recording::PacketMetadata {
-                                direction: aivpn_common::recording::Direction::Downlink,
-                                size: aivpn_packet.len() as u16,
-                                iat_ms: downlink_iat_ms,
-                                entropy: Self::compute_entropy(&ciphertext) as f32,
-                                header_prefix: aivpn_packet[TAG_SIZE..TAG_SIZE + 16.min(aivpn_packet.len() - TAG_SIZE)].to_vec(),
-                                timestamp_ns: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_nanos() as u64,
-                            };
-                            recorder.record_packet(session_id, meta);
+                    } else {
+                        // bytes_out already tracked inside the earlier lock scope
+                        if let Some(ref recorder) = recorder {
+                            if recorder.is_recording(&session_id) {
+                                let meta = aivpn_common::recording::PacketMetadata {
+                                    direction: aivpn_common::recording::Direction::Downlink,
+                                    size: aivpn_packet.len() as u16,
+                                    iat_ms: downlink_iat_ms,
+                                    entropy: Self::compute_entropy(&ciphertext) as f32,
+                                    header_prefix: aivpn_packet[TAG_SIZE..TAG_SIZE + 16.min(aivpn_packet.len() - TAG_SIZE)].to_vec(),
+                                    timestamp_ns: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_nanos() as u64,
+                                };
+                                recorder.record_packet(session_id, meta);
+                            }
                         }
                     }
                 }
@@ -1407,7 +1429,7 @@ impl Gateway {
                 db.record_handshake(cid);
                 // Store client_id in session for traffic accounting
                 session.lock().client_id = Some(cid.clone());
-                info!("Client '{}' authenticated via PSK", cid);
+                debug!("Client '{}' authenticated via PSK", cid);
             }
             
             self.send_server_hello(&session, client_addr).await?;
@@ -1435,7 +1457,7 @@ impl Gateway {
             // which was encrypted with pre-ratchet keys.
             
             is_new_session = true;
-            info!("New session from {} (ServerHello sent)", hash_addr(&client_addr));
+            debug!("New session from {} (ServerHello sent)", hash_addr(&client_addr));
             (session, counter, is_ratcheted)
         };
         
@@ -1544,7 +1566,7 @@ impl Gateway {
         let plaintext = &padded_plaintext[2..padded_plaintext.len() - pad_len];
         
         // Update session state. Avoid expensive O(window) tag-map rebuild on every packet.
-        let mut client_db_flush: Option<(String, u64)> = None;
+        let mut client_db_flush: Option<(String, u64, u64)> = None;
         let (session_id, refresh_tags) = {
             let mut sess = session.lock();
             sess.mark_tag_received(counter);
@@ -1569,11 +1591,12 @@ impl Gateway {
 
             // Batch client stats updates to avoid taking a global write lock per packet.
             sess.pending_bytes_in = sess.pending_bytes_in.saturating_add(packet_data.len() as u64);
-            if sess.pending_bytes_in >= 16 * 1024 {
+            if sess.pending_bytes_in >= 16 * 1024 || sess.pending_bytes_out >= 16 * 1024 {
                 if let Some(cid) = sess.client_id.clone() {
-                    client_db_flush = Some((cid, sess.pending_bytes_in));
+                    client_db_flush = Some((cid, sess.pending_bytes_in, sess.pending_bytes_out));
                 }
                 sess.pending_bytes_in = 0;
+                sess.pending_bytes_out = 0;
             }
 
             sess.update_fsm();
@@ -1629,9 +1652,9 @@ impl Gateway {
             }
         }
         
-        // Record traffic in client DB in batches (see pending_bytes_in above).
-        if let (Some(ref db), Some((cid, bytes_in))) = (&self.client_db, client_db_flush) {
-            db.record_traffic(&cid, bytes_in, 0);
+        // Record traffic in client DB in batches (see pending_bytes_in/out above).
+        if let (Some(ref db), Some((cid, bytes_in, bytes_out))) = (&self.client_db, client_db_flush) {
+            db.record_traffic(&cid, bytes_in, bytes_out);
         }
         
         // Process inner payload (skip for new sessions — ServerHello is already the response,

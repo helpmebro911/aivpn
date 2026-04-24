@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use chacha20poly1305::aead::OsRng;
 use rand::RngCore;
 use subtle::ConstantTimeEq;
-use tracing::{info, debug};
+use tracing::{info, debug, trace};
 use hex;
 
 use aivpn_common::crypto::{
@@ -95,6 +95,8 @@ pub struct Session {
     pub received_bitmap: u256,
     /// Accumulated inbound bytes to flush into client_db in batches.
     pub pending_bytes_in: u64,
+    /// Accumulated outbound (downlink) bytes to flush into client_db in batches.
+    pub pending_bytes_out: u64,
 
     // --- PFS Ratchet fields (CRIT-3) ---
     /// Server's ephemeral public key for this session
@@ -192,6 +194,7 @@ impl Session {
             tag_window_base: 0,
             received_bitmap: u256::default(),
             pending_bytes_in: 0,
+            pending_bytes_out: 0,
             server_eph_pub: None,
             server_hello_signature: None,
             ratcheted_keys: None,
@@ -390,6 +393,7 @@ impl Session {
             self.expected_tags = std::mem::take(&mut self.ratcheted_expected_tags);
             self.received_bitmap.clear();
             self.pending_bytes_in = 0;
+            self.pending_bytes_out = 0;
             self.is_ratcheted = true;
             self.server_eph_pub = None;
             self.server_hello_signature = None;
@@ -513,15 +517,15 @@ impl SessionManager {
         
         // DH1: server_static * client_eph → initial keys (0-RTT)
         let dh1 = self.server_keys.compute_shared(&eph_pub)?;
-        debug!("Server DH result: {}", hex::encode(&dh1));
-        debug!("Server eph_pub (after deobfuscation): {}", hex::encode(&eph_pub));
-        debug!("Server PSK: {:?}", preshared_key.as_ref().map(hex::encode));
+        trace!("Server DH result: {}", hex::encode(&dh1));
+        trace!("Server eph_pub (after deobfuscation): {}", hex::encode(&eph_pub));
+        trace!("Server PSK: {:?}", preshared_key.as_ref().map(hex::encode));
         let initial_keys = crypto::derive_session_keys(
             &dh1,
             preshared_key.as_ref(),
             &eph_pub,
         );
-        debug!("Server tag_secret: {}", hex::encode(&initial_keys.tag_secret));
+        trace!("Server tag_secret: {}", hex::encode(&initial_keys.tag_secret));
         
         // --- CRIT-3 + HIGH-6: PFS ratchet preparation ---
         // Generate server ephemeral keypair
@@ -596,7 +600,7 @@ impl SessionManager {
         if let Some(vpn_ip) = vpn_ip {
             session.lock().vpn_ip = Some(vpn_ip);
             self.vpn_ip_map.insert(vpn_ip, session_id);
-            info!("Assigned VPN IP {} to session", vpn_ip);
+            debug!("Assigned VPN IP {} to session", vpn_ip);
         }
         
         Ok(session)
